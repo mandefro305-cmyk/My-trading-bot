@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: goldhunter_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: goldhunter
+      POSTGRES_PASSWORD: goldhunter_secret_password
+      POSTGRES_DB: goldhunter
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  goldhunter_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: goldhunter_app
+    restart: always
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://goldhunter:goldhunter_secret_password@db:5432/goldhunter
+      - TRADING_MODE=PAPER
+      - EXNESS_MOCK_MODE=true
+    env_file:
+      - .env
+
+volumes:
+  postgres_data:
