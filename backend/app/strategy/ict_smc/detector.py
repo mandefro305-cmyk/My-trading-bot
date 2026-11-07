@@ -9,13 +9,16 @@ class ICTSMCDetector:
         if len(df) < window * 2 + 1:
             return {"swing_highs": swing_highs, "swing_lows": swing_lows}
 
+        has_time = "time" in df.columns
+
         for i in range(window, len(df) - window):
             high_val = df.iloc[i]["high"]
             low_val = df.iloc[i]["low"]
+            candle_time = df.iloc[i]["time"] if has_time else i
             if high_val == df.iloc[i - window : i + window + 1]["high"].max():
-                swing_highs.append({"index": i, "time": df.iloc[i]["time"], "price": high_val})
+                swing_highs.append({"index": i, "time": candle_time, "price": high_val})
             if low_val == df.iloc[i - window : i + window + 1]["low"].min():
-                swing_lows.append({"index": i, "time": df.iloc[i]["time"], "price": low_val})
+                swing_lows.append({"index": i, "time": candle_time, "price": low_val})
         return {"swing_highs": swing_highs, "swing_lows": swing_lows}
 
     @staticmethod

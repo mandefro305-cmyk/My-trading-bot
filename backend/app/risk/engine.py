@@ -1,13 +1,19 @@
 import math
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from backend.app.config.settings import settings
 
 class RiskEngine:
-    def __init__(self):
-        self.max_risk_pct = settings.MAX_RISK_PER_TRADE_PCT / 100.0
-        self.max_daily_loss_pct = settings.MAX_DAILY_LOSS_PCT / 100.0
-        self.max_trades_per_day = settings.MAX_TRADES_PER_DAY
-        self.max_consecutive_losses = settings.MAX_CONSECUTIVE_LOSSES
+    def __init__(
+        self,
+        max_risk_pct: Optional[float] = None,
+        max_daily_loss_pct: Optional[float] = None,
+        max_trades_per_day: Optional[int] = None,
+        max_consecutive_losses: Optional[int] = None
+    ):
+        self.max_risk_pct = (max_risk_pct if max_risk_pct is not None else settings.MAX_RISK_PER_TRADE_PCT) / 100.0
+        self.max_daily_loss_pct = (max_daily_loss_pct if max_daily_loss_pct is not None else settings.MAX_DAILY_LOSS_PCT) / 100.0
+        self.max_trades_per_day = max_trades_per_day if max_trades_per_day is not None else settings.MAX_TRADES_PER_DAY
+        self.max_consecutive_losses = max_consecutive_losses if max_consecutive_losses is not None else settings.MAX_CONSECUTIVE_LOSSES
         self.min_risk_reward = settings.MIN_RISK_REWARD
 
         self.daily_starting_equity = 10000.0
@@ -17,10 +23,22 @@ class RiskEngine:
         self.manual_approval_required = False
         self.paused = False
 
+    def can_open_new_trade(self) -> bool:
+        if self.paused:
+            return False
+        if self.manual_approval_required:
+            return False
+        if self.daily_trade_count >= self.max_trades_per_day:
+            return False
+        current_loss_pct = abs(min(0.0, self.daily_pnl)) / max(1.0, self.daily_starting_equity)
+        if current_loss_pct >= self.max_daily_loss_pct:
+            return False
+        return True
+
     def get_state(self) -> Dict[str, Any]:
         return {
-            "max_risk_pct": self.max_risk_pct * 100.0,
-            "max_daily_loss_pct": self.max_daily_loss_pct * 100.0,
+            "max_risk_pct": round(self.max_risk_pct * 100.0, 2),
+            "max_daily_loss_pct": round(self.max_daily_loss_pct * 100.0, 2),
             "max_trades_per_day": self.max_trades_per_day,
             "max_consecutive_losses": self.max_consecutive_losses,
             "min_risk_reward": self.min_risk_reward,
@@ -31,11 +49,8 @@ class RiskEngine:
             "consecutive_losses": self.consecutive_losses,
             "manual_approval_required": self.manual_approval_required,
             "paused": self.paused,
-            "can_trade": not self.paused and not self.manual_approval_required
+            "can_trade": self.can_open_new_trade()
         }
-
-    def sync_from_db(self, db_session=None):
-        pass
 
     def calculate_position_size(self, equity: float, entry_price: float, stop_loss: float) -> Tuple[bool, float, str]:
         sl_distance = abs(entry_price - stop_loss)
@@ -45,13 +60,6 @@ class RiskEngine:
         risk_per_lot = (sl_distance + 0.3) * 100.0
         lots = round(math.floor((risk_capital / risk_per_lot) / 0.01) * 0.01, 2)
         return True, max(0.01, min(100.0, lots)), "Success"
-
-    def validate_new_trade(self, equity: float, entry_price: float, stop_loss: float, take_profit: float) -> Tuple[bool, str]:
-        if self.paused:
-            return False, "Paused"
-        if self.manual_approval_required:
-            return False, "Manual approval required"
-        return True, "Valid"
 
     def record_trade_result(self, pnl: float, db_session=None):
         self.daily_pnl += pnl

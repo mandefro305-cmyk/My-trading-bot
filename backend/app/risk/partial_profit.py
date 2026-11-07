@@ -34,20 +34,20 @@ class PartialProfitEngine:
         volume_min: float = 0.01
     ) -> List[Dict[str, Any]]:
         actions = []
-        direction = position["direction"].lower()
-        open_price = float(position["open_price"])
-        stop_loss = float(position["stop_loss"])
-        initial_vol = float(position["initial_volume"])
-        current_vol = float(position["volume"])
+        direction = position.get("direction", "buy").lower()
+        open_price = float(position.get("open_price", 0.0))
+        stop_loss = float(position.get("stop_loss", 0.0))
+        initial_vol = float(position.get("initial_volume") or position.get("original_volume") or position.get("volume", 0.01))
+        current_vol = float(position.get("volume", initial_vol))
 
         current_price = current_bid if direction == "buy" else current_ask
         targets = self.calculate_targets(open_price, stop_loss, direction)
 
         # Stop loss check
-        if direction == "buy" and current_bid <= stop_loss:
+        if direction == "buy" and stop_loss > 0 and current_bid <= stop_loss:
             actions.append({"action": "CLOSE_FULL", "reason": "STOP_LOSS", "exec_price": current_bid, "volume": current_vol})
             return actions
-        elif direction == "sell" and current_ask >= stop_loss:
+        elif direction == "sell" and stop_loss > 0 and current_ask >= stop_loss:
             actions.append({"action": "CLOSE_FULL", "reason": "STOP_LOSS", "exec_price": current_ask, "volume": current_vol})
             return actions
 
