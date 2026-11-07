@@ -1,10 +1,14 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import datetime
 from pydantic import BaseModel
 from backend.app.config.settings import settings
 from backend.app.database.session import SessionLocal
 from backend.app.database.models import Position, Trade
+from backend.app.database.init_db import init_db
 from backend.app.services.worker import worker
 
 app = FastAPI(title=settings.PROJECT_NAME, version=settings.VERSION)
@@ -19,6 +23,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Warning: could not auto-initialize DB: {e}")
     await worker.start()
 
 @app.on_event("shutdown")
@@ -65,7 +73,26 @@ def list_positions():
 
 @app.get("/api/v1/trades")
 def list_trades():
-    return []
+    try:
+        db = SessionLocal()
+        trades = db.query(Trade).order_by(Trade.id.desc()).limit(50).all()
+        res = [
+            {
+                "id": t.id,
+                "direction": t.direction,
+                "volume": t.volume,
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "profit": t.profit,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None
+            }
+            for t in trades
+        ]
+        db.close()
+        return res
+    except Exception:
+        return []
 
 @app.get("/api/v1/candles")
 async def get_candles(timeframe: str = "M5", count: int = 60):
@@ -91,3 +118,15 @@ def handle_controls(req: ControlReq):
         worker.mock_gateway.positions.clear()
         return {"status": "ALL_POSITIONS_CLOSED"}
     return {"status": "OK"}
+
+# Serve frontend build if dist folder exists
+frontend_dist = os.path.join(os.getcwd(), "frontend", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        file_path = os.path.join(frontend_dist, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))

@@ -1,6 +1,6 @@
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 from backend.app.config.settings import settings
 
 logger = logging.getLogger("telegram_bot")
@@ -10,7 +10,7 @@ class TelegramControlBot:
         self.risk_engine = risk_engine
         self.worker = worker_service
         self.owner_id = settings.TELEGRAM_OWNER_ID
-        self.app = None
+        self.app: Application = None
 
     def _get_badge(self) -> str:
         mode = settings.TRADING_MODE
@@ -125,3 +125,29 @@ class TelegramControlBot:
         app.add_handler(CommandHandler("resume", self.resume_cmd))
         app.add_handler(CommandHandler("approve_resume", self.approve_resume_cmd))
         app.add_handler(CommandHandler("deny_resume", self.deny_resume_cmd))
+
+    async def start_polling(self):
+        if not settings.TELEGRAM_BOT_TOKEN or "your_telegram" in settings.TELEGRAM_BOT_TOKEN:
+            logger.info("Telegram bot token not provided or is placeholder; skipping polling.")
+            return
+        try:
+            builder = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN)
+            self.app = builder.build()
+            self.register_handlers(self.app)
+            await self.app.initialize()
+            await self.app.start()
+            await self.app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram bot initialized and started polling successfully.")
+        except Exception as e:
+            logger.error(f"Failed to start Telegram bot: {e}")
+
+    async def stop(self):
+        if self.app:
+            try:
+                if self.app.updater and self.app.updater.running:
+                    await self.app.updater.stop()
+                if self.app.running:
+                    await self.app.stop()
+                await self.app.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down Telegram bot: {e}")

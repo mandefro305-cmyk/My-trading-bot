@@ -11,6 +11,8 @@ from backend.app.risk.partial_profit import PartialProfitEngine
 from backend.app.news.engine import NewsEngine
 from backend.app.ai.xkiro.client import XKiroClient
 from backend.app.telegram.bot import TelegramControlBot
+from backend.app.database.session import SessionLocal
+from backend.app.database.models import Trade, Position, SystemLog
 
 logger = logging.getLogger("worker")
 
@@ -22,6 +24,7 @@ class BackgroundWorker:
       - Scans multi-timeframe ICT/SMC patterns for high-probability setups.
       - Confirms direction with xKiro AI and checks news blackout.
       - Executes orders through Exness Broker API or Mock Paper Gateway.
+      - Persists trades and state into database.
     """
 
     def __init__(self):
@@ -57,12 +60,14 @@ class BackgroundWorker:
         self.news_engine.populate_seed_events_if_empty()
         self.mock_gateway.on_tick_callbacks.append(self._on_tick)
         await self.mock_gateway.start()
+        await self.telegram_bot.start_polling()
         self._loop_task = asyncio.create_task(self._main_loop())
 
     async def stop(self):
         self.running = False
         if self._loop_task:
             self._loop_task.cancel()
+        await self.telegram_bot.stop()
         await self.mock_gateway.stop()
 
     def _on_tick(self, tick):
@@ -88,7 +93,13 @@ class BackgroundWorker:
                 if act["action"] == "CLOSE_PARTIAL":
                     vol = act["volume"]
                     stage = act["stage"]
+                    if self.exness_client and settings.LIVE_TRADING_ENABLED:
+                        try:
+                            await self.exness_client.close_position(pos_id, volume=str(vol))
+                        except Exception as e:
+                            logger.error(f"Exness close partial error: {e}")
                     await self.mock_gateway.close_position(pos_id, volume=str(vol))
+
                     if stage == "TP1":
                         pos["tp1_hit"] = True
                         if act.get("move_sl_to_be"):
@@ -100,9 +111,36 @@ class BackgroundWorker:
                         f"Position #{pos_id} closed {vol} lots @ {act['exec_price']:.2f}"
                     )
                 elif act["action"] == "CLOSE_FULL":
+                    if self.exness_client and settings.LIVE_TRADING_ENABLED:
+                        try:
+                            await self.exness_client.close_position(pos_id)
+                        except Exception as e:
+                            logger.error(f"Exness close full error: {e}")
                     await self.mock_gateway.close_position(pos_id)
+
                     pnl = (act["exec_price"] - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - act["exec_price"]) * pos["volume"] * 100.0
                     self.risk_engine.record_trade_result(pnl)
+
+                    # Persist to DB
+                    try:
+                        db = SessionLocal()
+                        t = Trade(
+                            account_id=1,
+                            instrument_id=1,
+                            direction=pos["direction"].upper(),
+                            volume=pos["original_volume"],
+                            entry_price=pos["open_price"],
+                            exit_price=act["exec_price"],
+                            profit=pnl,
+                            pnl=pnl,
+                            status="CLOSED"
+                        )
+                        db.add(t)
+                        db.commit()
+                        db.close()
+                    except Exception as db_err:
+                        logger.error(f"Failed to persist trade in db: {db_err}")
+
                     await self.telegram_bot.send_notification(
                         f"🏁 <b>Position Closed ({act['reason']})</b>\n"
                         f"Position #{pos_id} PnL: <b>${pnl:.2f}</b>"
@@ -144,13 +182,45 @@ class BackgroundWorker:
         self.last_ai_analysis = ai_res.model_dump()
 
         # Open position
-        await self.mock_gateway.open_position(
+        if self.exness_client and settings.LIVE_TRADING_ENABLED:
+            try:
+                await self.exness_client.create_order(
+                    symbol="XAUUSD",
+                    side=setup["direction"],
+                    order_type="MARKET",
+                    volume=str(lots),
+                    stop_loss_price=str(setup["stop_loss"]),
+                    take_profit_price=str(setup["tp2"])
+                )
+            except Exception as e:
+                logger.error(f"Exness API order error: {e}")
+
+        res = await self.mock_gateway.open_position(
             symbol="XAUUSD",
             side=setup["direction"],
             volume=str(lots),
             stop_loss_price=str(setup["stop_loss"]),
             take_profit_price=str(setup["tp2"])
         )
+
+        pos_info = res.get("position", {})
+        try:
+            db = SessionLocal()
+            pos_db = Position(
+                account_id=1,
+                instrument_id=1,
+                direction=setup["direction"].upper(),
+                volume=lots,
+                open_price=setup["entry_price"],
+                stop_loss=setup["stop_loss"],
+                take_profit=setup["tp2"],
+                status="OPEN"
+            )
+            db.add(pos_db)
+            db.commit()
+            db.close()
+        except Exception as db_err:
+            logger.error(f"Failed to persist position to db: {db_err}")
 
         await self.telegram_bot.send_notification(
             f"🚀 <b>New High-Probability Trade!</b>\n"

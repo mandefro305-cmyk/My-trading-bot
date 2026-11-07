@@ -74,7 +74,43 @@ class MockExnessGateway:
             p = c
         return candles
 
+    async def open_position(
+        self,
+        symbol: str,
+        side: str,
+        volume: str,
+        stop_loss_price: Optional[str] = None,
+        take_profit_price: Optional[str] = None
+    ) -> Dict[str, Any]:
+        pos_id = str(uuid.uuid4())[:8]
+        prices = self.get_bid_ask()
+        open_price = prices["ask"] if side.lower() == "buy" else prices["bid"]
+
+        pos_data = {
+            "id": pos_id,
+            "symbol": symbol,
+            "direction": side.lower(),
+            "volume": float(volume),
+            "original_volume": float(volume),
+            "open_price": open_price,
+            "stop_loss": float(stop_loss_price) if stop_loss_price else None,
+            "take_profit": float(take_profit_price) if take_profit_price else None,
+            "tp1_hit": False,
+            "tp2_hit": False,
+            "tp3_hit": False,
+            "opened_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        self.positions[pos_id] = pos_data
+        return {"status": "filled", "order_id": pos_id, "position": pos_data}
+
     async def close_position(self, position_id: str, volume: Optional[str] = None):
         if position_id in self.positions:
-            del self.positions[position_id]
+            if volume:
+                vol_to_close = float(volume)
+                pos = self.positions[position_id]
+                pos["volume"] = max(0.0, round(pos["volume"] - vol_to_close, 2))
+                if pos["volume"] <= 0.001:
+                    del self.positions[position_id]
+            else:
+                del self.positions[position_id]
         return {"status": "accepted"}

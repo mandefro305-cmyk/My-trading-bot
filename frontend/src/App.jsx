@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import TradingViewChart from './components/TradingViewChart';
 
-const API_BASE = 'http://localhost:8000/api/v1';
+const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000/api/v1' : '/api/v1';
 
 export default function App() {
   const [overview, setOverview] = useState(null);
