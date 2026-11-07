@@ -53,14 +53,27 @@ class ExnessClient:
             resp.raise_for_status()
             return resp.json().get("candles", [])
 
-    async def open_position(self, symbol: str, side: str, volume: str) -> Dict[str, Any]:
+    async def open_position(self, symbol: str, side: str, volume: str, stop_loss_price: Optional[str] = None, take_profit_price: Optional[str] = None) -> Dict[str, Any]:
         path = f"/v1/trading/accounts/{self.account_id}/positions"
         body = {"instrument": symbol, "side": side.lower(), "volume": str(volume)}
+        if stop_loss_price:
+            body["stop_loss"] = str(stop_loss_price)
+        if take_profit_price:
+            body["take_profit"] = str(take_profit_price)
         headers = self._get_headers("POST", path, idempotency_key=f"gh-{uuid.uuid4().hex[:12]}", body=body)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(f"{self.base_url}{path}", json=body, headers=headers)
             resp.raise_for_status()
             return resp.json()
+
+    async def create_order(self, symbol: str, side: str, order_type: str, volume: str, stop_loss_price: Optional[str] = None, take_profit_price: Optional[str] = None) -> Dict[str, Any]:
+        return await self.open_position(
+            symbol=symbol,
+            side=side,
+            volume=volume,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price
+        )
 
     async def close_position(self, position_id: str, volume: Optional[str] = None) -> Dict[str, Any]:
         path = f"/v1/trading/accounts/{self.account_id}/positions/{position_id}"

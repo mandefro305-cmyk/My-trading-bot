@@ -79,13 +79,15 @@ def list_trades():
         res = [
             {
                 "id": t.id,
+                "trade_id": t.trade_id,
                 "direction": t.direction,
                 "volume": t.volume,
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price,
-                "profit": t.profit,
+                "profit": t.pnl,
+                "pnl": t.pnl,
                 "status": t.status,
-                "created_at": t.created_at.isoformat() if t.created_at else None
+                "created_at": t.opened_at.isoformat() if t.opened_at else None
             }
             for t in trades
         ]

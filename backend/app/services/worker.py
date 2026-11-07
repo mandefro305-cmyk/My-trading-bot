@@ -124,16 +124,24 @@ class BackgroundWorker:
                     # Persist to DB
                     try:
                         db = SessionLocal()
+                        trade_id = str(pos.get("trade_id") or f"TR-{uuid.uuid4().hex[:8]}")
                         t = Trade(
-                            account_id=1,
-                            instrument_id=1,
+                            trade_id=trade_id,
+                            account_id=str(settings.EXNESS_ACCOUNT_ID or "paper-acc"),
+                            mode=settings.TRADING_MODE,
+                            symbol="XAUUSD",
                             direction=pos["direction"].upper(),
                             volume=pos["original_volume"],
                             entry_price=pos["open_price"],
                             exit_price=act["exec_price"],
-                            profit=pnl,
+                            stop_loss=pos.get("stop_loss", 0.0),
+                            take_profit_1=pos.get("take_profit_1", 0.0),
+                            take_profit_2=pos.get("take_profit_2", 0.0),
+                            take_profit_3=pos.get("take_profit_3", 0.0),
                             pnl=pnl,
-                            status="CLOSED"
+                            status="CLOSED",
+                            close_reason=act.get("reason", "CLOSED"),
+                            closed_at=datetime.datetime.utcnow()
                         )
                         db.add(t)
                         db.commit()
@@ -204,17 +212,22 @@ class BackgroundWorker:
         )
 
         pos_info = res.get("position", {})
+        pos_id_str = str(pos_info.get("id") or f"POS-{uuid.uuid4().hex[:8]}")
         try:
             db = SessionLocal()
             pos_db = Position(
-                account_id=1,
-                instrument_id=1,
+                position_id=pos_id_str,
+                account_id=str(settings.EXNESS_ACCOUNT_ID or "paper-acc"),
+                mode=settings.TRADING_MODE,
+                symbol="XAUUSD",
                 direction=setup["direction"].upper(),
-                volume=lots,
+                initial_volume=lots,
+                current_volume=lots,
                 open_price=setup["entry_price"],
+                current_price=setup["entry_price"],
                 stop_loss=setup["stop_loss"],
                 take_profit=setup["tp2"],
-                status="OPEN"
+                state="OPEN"
             )
             db.add(pos_db)
             db.commit()
