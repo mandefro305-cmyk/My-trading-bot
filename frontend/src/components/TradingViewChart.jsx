@@ -35,13 +35,24 @@ export default function TradingViewChart({ candles = [], height = 380 }) {
     });
 
     if (candles && candles.length > 0) {
-      const formatted = candles.map((c) => ({
-        time: Math.floor(new Date(c.time).getTime() / 1000),
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      })).sort((a, b) => a.time - b.time);
+      const formatted = candles.map((c) => {
+        let t = c.time || c.timestamp;
+        let timeSec;
+        if (typeof t === "number") {
+          timeSec = t > 1e11 ? Math.floor(t / 1000) : t;
+        } else if (typeof t === "string") {
+          timeSec = Math.floor(new Date(t).getTime() / 1000);
+        } else {
+          timeSec = Math.floor(Date.now() / 1000);
+        }
+        return {
+          time: timeSec,
+          open: parseFloat(c.open),
+          high: parseFloat(c.high),
+          low: parseFloat(c.low),
+          close: parseFloat(c.close),
+        };
+      }).sort((a, b) => a.time - b.time);
 
       const unique = [];
       const seen = new Set();

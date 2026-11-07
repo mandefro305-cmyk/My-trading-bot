@@ -71,41 +71,115 @@ class ExnessClient:
             logger.warning(f"Exness get_account_summary failed: {e}")
             return {
                 "account_id": self.account_id,
-                "balance": 10000.0,
-                "equity": 10000.0,
+                "balance": 500.0,
+                "equity": 500.0,
                 "margin": 0.0,
-                "free_margin": 10000.0,
-                "currency": "USD"
+                "free_margin": 500.0,
+                "currency": "USD",
+                "leverage": "1:2000"
             }
 
     async def get_quote(self, symbol: str = "XAUUSD") -> Dict[str, float]:
-        """Fetch latest bid/ask quote for instrument."""
-        path = f"/v1/market-data/accounts/{self.account_id}/quotes?instrument={symbol}"
-        headers = self._get_headers("GET", path)
+        """Fetch latest bid/ask quote for instrument directly from Exness or live gold feeds."""
+        symbols_to_try = [symbol]
+        if "XAUUSD" in symbol and "m" not in symbol:
+            symbols_to_try.append(symbol + "m")
+        elif "m" in symbol:
+            symbols_to_try.append(symbol.replace("m", ""))
+
+        for sym in symbols_to_try:
+            path = f"/v1/market-data/accounts/{self.account_id}/quotes?instrument={sym}"
+            headers = self._get_headers("GET", path)
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.get(f"{self.base_url}{path}", headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        bid = float(data.get("bid", 0.0))
+                        ask = float(data.get("ask", 0.0))
+                        if bid > 0 and ask > 0:
+                            return {"bid": bid, "ask": ask}
+            except Exception:
+                pass
+
+        # Live Real-Time Fallback to institutional gold market feed
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(f"{self.base_url}{path}", headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                return {
-                    "bid": float(data.get("bid", 2900.0)),
-                    "ask": float(data.get("ask", 2900.25))
-                }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                feed_resp = await client.get(
+                    "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                if feed_resp.status_code == 200:
+                    data = feed_resp.json()
+                    res = data.get("chart", {}).get("result", [{}])[0]
+                    live_price = res.get("meta", {}).get("regularMarketPrice")
+                    if not live_price:
+                        quotes = res.get("indicators", {}).get("quote", [{}])[0]
+                        closes = [c for c in quotes.get("close", []) if c is not None]
+                        if closes:
+                            live_price = closes[-1]
+                    if live_price and live_price > 0:
+                        return {"bid": round(float(live_price), 2), "ask": round(float(live_price) + 0.25, 2)}
         except Exception as e:
-            logger.debug(f"Exness get_quote fallback: {e}")
-            return {"bid": 2900.0, "ask": 2900.25}
+            logger.debug(f"Live market quote fallback failed: {e}")
+
+        return {"bid": 2900.0, "ask": 2900.25}
 
     async def get_candles(self, symbol: str = "XAUUSD", timeframe: str = "M5", count: int = 60) -> List[Dict[str, Any]]:
-        path = f"/v1/market-data/accounts/{self.account_id}/candles?instrument={symbol}&timeframe={timeframe}&price_type=bid&count={count}"
-        headers = self._get_headers("GET", path)
+        symbols_to_try = [symbol]
+        if "XAUUSD" in symbol and "m" not in symbol:
+            symbols_to_try.append(symbol + "m")
+
+        for sym in symbols_to_try:
+            path = f"/v1/market-data/accounts/{self.account_id}/candles?instrument={sym}&timeframe={timeframe}&price_type=bid&count={count}"
+            headers = self._get_headers("GET", path)
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.get(f"{self.base_url}{path}", headers=headers)
+                    if resp.status_code == 200:
+                        candles = resp.json().get("candles", [])
+                        if candles:
+                            return candles
+            except Exception:
+                pass
+
+        # Live Real-Time M5 Candle feed from institutional gold market
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.get(f"{self.base_url}{path}", headers=headers)
-                resp.raise_for_status()
-                return resp.json().get("candles", [])
+            interval = "5m" if timeframe.upper() in ["M5", "5M"] else "15m" if timeframe.upper() in ["M15", "15M"] else "1h" if timeframe.upper() in ["H1", "1H"] else "5m"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                feed_resp = await client.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval={interval}&range=2d",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                if feed_resp.status_code == 200:
+                    data = feed_resp.json()
+                    res = data.get("chart", {}).get("result", [{}])[0]
+                    timestamps = res.get("timestamp", [])
+                    quotes = res.get("indicators", {}).get("quote", [{}])[0]
+                    opens = quotes.get("open", [])
+                    highs = quotes.get("high", [])
+                    lows = quotes.get("low", [])
+                    closes = quotes.get("close", [])
+                    volumes = quotes.get("volume", [])
+
+                    candles = []
+                    for i in range(len(timestamps)):
+                        if opens[i] is not None and closes[i] is not None:
+                            candles.append({
+                                "time": timestamps[i],
+                                "timestamp": timestamps[i],
+                                "open": round(float(opens[i]), 2),
+                                "high": round(float(highs[i]), 2),
+                                "low": round(float(lows[i]), 2),
+                                "close": round(float(closes[i]), 2),
+                                "volume": int(volumes[i] or 0)
+                            })
+                    if candles:
+                        return candles[-count:]
         except Exception as e:
-            logger.warning(f"Exness get_candles failed: {e}")
-            return []
+            logger.debug(f"Live market candle fallback failed: {e}")
+
+        return []
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
         """Fetch all currently open positions on Exness."""
@@ -128,11 +202,12 @@ class ExnessClient:
         stop_loss_price: Optional[str] = None,
         take_profit_price: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute a market order on Exness."""
-        path = f"/v1/trading/accounts/{self.account_id}/positions"
+        """Execute a market order on Exness using official /orders endpoint."""
+        path = f"/v1/trading/accounts/{self.account_id}/orders"
         body = {
             "instrument": symbol,
             "side": side.lower(),
+            "type": "market",
             "volume": str(volume)
         }
         if stop_loss_price:

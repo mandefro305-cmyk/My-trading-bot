@@ -26,7 +26,7 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=postgresql://goldhunter:goldhunter_secret_password@db:5432/goldhunter
-      - TRADING_MODE=PAPER
+      - TRADING_MODE=EXNESS_DEMO
       - EXNESS_MOCK_MODE=true
     env_file:
       - .env

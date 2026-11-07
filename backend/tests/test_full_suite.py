@@ -86,6 +86,9 @@ def test_partial_profit_taking_3_stages():
     assert actions[0]["move_sl_to_be"] is True
 
 def test_settings_persistence_and_telegram_bot_badge():
+    from backend.app.database.init_db import init_db
+    init_db()
+
     SettingsService.set_setting("TRADING_MODE", "EXNESS_DEMO")
     SettingsService.set_setting("MAX_RISK_PER_TRADE_PCT", "0.75")
     s = SettingsService.get_all_settings()
@@ -94,3 +97,32 @@ def test_settings_persistence_and_telegram_bot_badge():
 
     bot = TelegramControlBot(RiskEngine())
     assert "DEMO" in bot._get_badge()
+
+@pytest.mark.asyncio
+async def test_exness_order_endpoint_structure():
+    priv = ed25519.Ed25519PrivateKey.generate()
+    raw = priv.private_bytes_raw()
+    b64_key = base64.b64encode(raw).decode()
+
+    client = ExnessClient(
+        base_url="https://api.exness-trader.com",
+        account_id="ex-11001067896",
+        api_key="demo-key",
+        private_key_b64=b64_key
+    )
+    # Validate headers generated for official /orders endpoint
+    body = {"instrument": "XAUUSD", "side": "buy", "type": "market", "volume": "0.01"}
+    headers = client._get_headers("POST", f"/v1/trading/accounts/{client.account_id}/orders", "idem-1", body)
+    assert "EXN-API-KEY" in headers
+    assert "EXN-SIGN" in headers
+    assert "EXN-TIMESTAMP" in headers
+
+def test_risk_position_sizing_guard():
+    re = RiskEngine(max_risk_pct=0.5)
+    # Entry at 2900, SL at 2890 -> $10 risk per lot = $1000 per lot
+    # Account equity $500, max risk 0.5% = $2.50
+    # Minimum lot (0.01) risk would be 0.01 * $10 * 100 = $10.00 > $2.50
+    # Should safely reject or clip according to strict deterministic rules
+    allowed, lots, reason = re.calculate_position_size(equity=500.0, entry_price=2900.0, stop_loss=2890.0)
+    assert allowed is False
+    assert "exceeds" in reason or lots == 0.0

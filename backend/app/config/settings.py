@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
 
     # Execution Mode: EXNESS_DEMO or EXNESS_REAL (paper staff removed)
-    TRADING_MODE: Literal["EXNESS_DEMO", "EXNESS_REAL"] = "EXNESS_DEMO"
+    TRADING_MODE: Literal["EXNESS_DEMO", "EXNESS_REAL", "PAPER"] = "EXNESS_DEMO"
     LIVE_TRADING_CONFIRMED: bool = False
 
     SYMBOL: str = "XAUUSD"

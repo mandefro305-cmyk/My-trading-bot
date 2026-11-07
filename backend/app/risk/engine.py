@@ -58,8 +58,15 @@ class RiskEngine:
             return False, 0.0, "Zero SL distance"
         risk_capital = equity * self.max_risk_pct
         risk_per_lot = (sl_distance + 0.3) * 100.0
+        min_volume = 0.01
+        min_risk = min_volume * risk_per_lot
+        # Deterministic check: If broker minimum volume risk exceeds permitted risk capital, skip trade
+        if min_risk > risk_capital:
+            return False, 0.0, f"Minimum volume risk (${min_risk:.2f}) exceeds permitted risk capital (${risk_capital:.2f})"
+
         lots = round(math.floor((risk_capital / risk_per_lot) / 0.01) * 0.01, 2)
-        return True, max(0.01, min(100.0, lots)), "Success"
+        final_lots = max(min_volume, min(100.0, lots))
+        return True, final_lots, "Success"
 
     def record_trade_result(self, pnl: float, db_session=None):
         self.daily_pnl += pnl
