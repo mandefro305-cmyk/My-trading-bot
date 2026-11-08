@@ -15,22 +15,26 @@ class Settings(BaseSettings):
     LIVE_TRADING_CONFIRMED: bool = False
 
     SYMBOL: str = "XAUUSD"
-    EXNESS_API_BASE_URL: str = "https://api.exness-trader.com"
+    EXNESS_API_BASE_URL: str = "https://api.exness.com"
+    EXNESS_API_ALT_BASE_URL: str = "https://api.exness-api.com"
 
     # Exness Demo Account Credentials
     EXNESS_DEMO_ACCOUNT_ID: str = ""
     EXNESS_DEMO_API_KEY: str = ""
     EXNESS_DEMO_PRIVATE_KEY_B64: str = ""
+    EXNESS_DEMO_PRIVATE_SIGNING_KEY: str = ""
 
     # Exness Real Account Credentials
     EXNESS_REAL_ACCOUNT_ID: str = ""
     EXNESS_REAL_API_KEY: str = ""
     EXNESS_REAL_PRIVATE_KEY_B64: str = ""
+    EXNESS_REAL_PRIVATE_SIGNING_KEY: str = ""
 
     # Shared Fallback Exness Credentials if user uses single key
     EXNESS_ACCOUNT_ID: str = ""
     EXNESS_API_KEY: str = ""
     EXNESS_PRIVATE_KEY_B64: str = ""
+    EXNESS_PRIVATE_SIGNING_KEY: str = ""
 
     # AI Engine (xKiro)
     XKIRO_BASE_URL: str = "https://api.xkiro.com/v1"
