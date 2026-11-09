@@ -316,7 +316,8 @@ class BackgroundWorker:
         )
         self.last_ai_analysis = ai_res.model_dump()
 
-        pos_id = f"EX-{uuid.uuid4().hex[:8]}"
+        # In strict broker execution mode, send order to Exness and confirm execution
+        pos_id = None
         if client:
             try:
                 res = await client.open_position(
@@ -326,10 +327,22 @@ class BackgroundWorker:
                     stop_loss_price=str(setup["stop_loss"]),
                     take_profit_price=str(setup["tp2"])
                 )
-                if res and "position" in res:
-                    pos_id = str(res["position"].get("id", pos_id))
+                if res and ("position" in res or "operation" in res or "ack" in res):
+                    # Check operation confirmation or returned position object
+                    pos_obj = res.get("position", {})
+                    op_obj = res.get("operation", {})
+                    if op_obj and op_obj.get("status") in ["rejected", "failed"]:
+                        logger.error(f"Exness order execution rejected/failed: {op_obj}")
+                        return
+                    pos_id = str(pos_obj.get("id") or op_obj.get("position_id") or res.get("ack", {}).get("position_id") or "")
             except Exception as e:
-                logger.error(f"Exness open position error: {e}")
+                logger.error(f"Exness order execution failed: {e}")
+                return
+
+        # Do not record phantom trades if order was rejected or could not be verified
+        if not pos_id:
+            logger.warning("Order execution could not be verified with broker. Aborting position registration.")
+            return
 
         new_pos = {
             "id": pos_id,
