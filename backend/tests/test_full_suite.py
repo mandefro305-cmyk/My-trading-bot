@@ -154,3 +154,24 @@ def test_telegram_control_bot_initialization():
     assert bot._get_badge() in ["🔴 <b>[EXNESS REAL]</b>", "🟡 <b>[EXNESS DEMO]</b>"]
     kb = bot._get_main_keyboard()
     assert len(kb.inline_keyboard) > 0
+
+def test_telegram_price_alerts_and_perf():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from backend.app.telegram.bot import TelegramControlBot
+    from backend.app.risk.engine import RiskEngine
+
+    risk = RiskEngine()
+    bot = TelegramControlBot(risk)
+    bot.owner_id = 12345
+    bot.app = MagicMock()
+    bot.app.bot.send_message = AsyncMock()
+
+    # Test setting price alert
+    bot.price_alerts[2950.0] = "Alert when price goes ABOVE"
+    assert len(bot.price_alerts) == 1
+
+    # Check alert trigger when price hits
+    asyncio.run(bot.check_price_alerts(2950.2))
+    assert 2950.0 not in bot.price_alerts
+    assert bot.app.bot.send_message.called

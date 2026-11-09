@@ -111,11 +111,24 @@ class BackgroundWorker:
         await self.telegram_bot.stop()
 
     async def _main_loop(self):
+        last_briefing_hour = -1
         while self.running:
             try:
                 await self._sync_account_and_market()
                 await self._manage_positions()
                 await self._scan_market()
+
+                # Check price alerts and upcoming news warnings on every cycle
+                await self.telegram_bot.check_price_alerts(self.current_bid)
+                await self.telegram_bot.check_upcoming_news_warning()
+
+                # Session briefings at London Open (07:00 UTC) and NY Open (13:00 UTC)
+                now_utc = datetime.datetime.utcnow()
+                if now_utc.hour in [7, 13] and now_utc.hour != last_briefing_hour:
+                    session_name = "London Open 🇬🇧" if now_utc.hour == 7 else "New York Open 🇺🇸"
+                    await self.telegram_bot.send_session_briefing(session_name)
+                    last_briefing_hour = now_utc.hour
+
                 # Throttled to 15 seconds to stay comfortably within Exness and Cloudflare rate limits
                 await asyncio.sleep(15.0)
             except asyncio.CancelledError:

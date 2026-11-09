@@ -1,4 +1,5 @@
 import logging
+import datetime
 from typing import Dict, Any, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,6 +31,8 @@ class TelegramControlBot:
         self.worker = worker_service
         self.owner_id = settings.TELEGRAM_OWNER_ID
         self.app: Optional[Application] = None
+        self.price_alerts: Dict[float, str] = {}  # target_price: note/direction
+        self.last_news_notified: set = set()
 
     def _get_badge(self) -> str:
         mode = self.worker.trading_mode if self.worker else settings.TRADING_MODE
@@ -47,15 +50,19 @@ class TelegramControlBot:
         keyboard = [
             [
                 InlineKeyboardButton("📊 Account & Status", callback_data="menu_status"),
-                InlineKeyboardButton("⚡ Switch Mode", callback_data="menu_mode")
+                InlineKeyboardButton("🏆 Performance", callback_data="menu_perf")
             ],
             [
                 InlineKeyboardButton("📈 Open Positions", callback_data="menu_positions"),
                 InlineKeyboardButton("🧠 AI Analysis", callback_data="menu_analysis")
             ],
             [
-                InlineKeyboardButton("⚙️ Rule Controls", callback_data="menu_rules"),
-                InlineKeyboardButton("📰 News & Blackouts", callback_data="menu_news")
+                InlineKeyboardButton("⚡ Switch Mode", callback_data="menu_mode"),
+                InlineKeyboardButton("⚙️ Rule Controls", callback_data="menu_rules")
+            ],
+            [
+                InlineKeyboardButton("📰 News & Blackouts", callback_data="menu_news"),
+                InlineKeyboardButton("🔔 Price Alerts", callback_data="menu_alerts")
             ],
             [
                 InlineKeyboardButton("⏸️ Pause", callback_data="action_pause"),
@@ -94,8 +101,10 @@ class TelegramControlBot:
             f"📖 <b>Interactive Command Guide</b> {badge}\n\n"
             f"/menu or /start - Open interactive master dashboard\n"
             f"/status - Instant account health & risk metrics\n"
+            f"/performance - Win rate, profit factor, net P&L metrics\n"
             f"/mode - Switch between Exness DEMO and REAL\n"
             f"/positions - List active positions with quick action buttons\n"
+            f"/alert &lt;price&gt; - Set custom Gold (XAU/USD) price alert\n"
             f"/rules - View & adjust risk %, loss limits, max trades\n"
             f"/analysis - Live xKiro AI ICT/SMC market view\n"
             f"/news - Economic calendar & high-impact blackout status\n"
@@ -104,6 +113,86 @@ class TelegramControlBot:
             f"/closeall - Emergency close all positions"
         )
         await self._send_or_edit(update, text, self._get_main_keyboard())
+
+    async def performance_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        from backend.app.database.session import SessionLocal
+        from backend.app.database.models import Trade
+
+        badge = self._get_badge()
+        db = SessionLocal()
+        try:
+            trades = db.query(Trade).all()
+            total_trades = len(trades)
+            winning_trades = [t for t in trades if (t.pnl or 0.0) > 0]
+            losing_trades = [t for t in trades if (t.pnl or 0.0) < 0]
+
+            win_count = len(winning_trades)
+            loss_count = len(losing_trades)
+            win_rate = (win_count / total_trades * 100.0) if total_trades > 0 else 0.0
+
+            gross_profit = sum(t.pnl for t in winning_trades)
+            gross_loss = abs(sum(t.pnl for t in losing_trades))
+            profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (round(gross_profit, 2) if gross_profit > 0 else 0.0)
+            net_pnl = gross_profit - gross_loss
+
+            text = (
+                f"🏆 <b>Performance Metrics Snapshot</b> {badge}\n\n"
+                f"• Total Closed Trades: <b>{total_trades}</b>\n"
+                f"• Win Rate: <b>{win_rate:.1f}%</b> ({win_count}W / {loss_count}L)\n"
+                f"• Profit Factor: <b>{profit_factor}</b>\n"
+                f"• Gross Profit: <b>+${gross_profit:.2f}</b>\n"
+                f"• Gross Loss: <b>-${gross_loss:.2f}</b>\n"
+                f"• Net P&L: <b>{'🟢 +$' if net_pnl >= 0 else '🔴 -$'}{abs(net_pnl):.2f}</b>\n\n"
+                f"<i>Realized stats calculated directly from verified database ledger.</i>"
+            )
+        except Exception as e:
+            text = f"🏆 <b>Performance Metrics</b>\n\nError calculating ledger metrics: {e}"
+        finally:
+            db.close()
+
+        buttons = [
+            [InlineKeyboardButton("🔄 Refresh", callback_data="menu_perf")],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+        ]
+        await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+    async def alert_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        args = context.args if context and context.args else []
+        badge = self._get_badge()
+        if not args:
+            cur_price = self.worker.current_bid if self.worker else 2900.0
+            alerts_text = "\n".join([f"• <b>${p:.2f}</b> ({note})" for p, note in self.price_alerts.items()]) or "No active alerts set."
+            text = (
+                f"🔔 <b>Custom Gold Price Alerts</b> {badge}\n\n"
+                f"Current Bid: <b>${cur_price:.2f}</b>\n\n"
+                f"<b>Active Price Triggers:</b>\n{alerts_text}\n\n"
+                f"To set a new alert, send:\n<code>/alert &lt;target_price&gt;</code>\nExample: <code>/alert 2950.00</code>"
+            )
+            buttons = [
+                [InlineKeyboardButton("Clear All Alerts", callback_data="clear_price_alerts")],
+                [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+            ]
+            await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+            return
+
+        try:
+            target = float(args[0])
+            cur = self.worker.current_bid if self.worker else 2900.0
+            direction = "ABOVE" if target > cur else "BELOW"
+            self.price_alerts[target] = f"Alert when price goes {direction}"
+            text = (
+                f"✅ <b>Price Alert Set!</b>\n"
+                f"Target Price: <b>${target:.2f}</b>\n"
+                f"Current Price: <b>${cur:.2f}</b>\n"
+                f"You will receive an instant notification when XAU/USD crosses this level."
+            )
+            await update.message.reply_html(text, reply_markup=self._get_main_keyboard())
+        except ValueError:
+            await update.message.reply_text("Invalid price format. Please specify a number, e.g. /alert 2925.50")
 
     async def status_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_owner(update):
@@ -173,7 +262,9 @@ class TelegramControlBot:
             )
             buttons.append([
                 InlineKeyboardButton(f"❌ Close #{pid}", callback_data=f"pos_close_{pid}"),
-                InlineKeyboardButton(f"🛡️ Move SL to BE", callback_data=f"pos_be_{pid}")
+                InlineKeyboardButton(f"✂️ Close 50%", callback_data=f"pos_half_{pid}"),
+                InlineKeyboardButton(f"🛡️ SL to BE", callback_data=f"pos_be_{pid}"),
+                InlineKeyboardButton(f"⚡ Trail ATR", callback_data=f"pos_trail_{pid}")
             ])
         buttons.append([InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")])
         await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
@@ -315,6 +406,14 @@ class TelegramControlBot:
             await self.analysis_cmd(update, context)
         elif data == "menu_news":
             await self.news_cmd(update, context)
+        elif data == "menu_perf":
+            await self.performance_cmd(update, context)
+        elif data == "menu_alerts":
+            await self.alert_cmd(update, context)
+        elif data == "clear_price_alerts":
+            self.price_alerts.clear()
+            await query.answer("All price alerts cleared!", show_alert=True)
+            await self.alert_cmd(update, context)
         elif data == "action_pause":
             await self.pause_cmd(update, context)
         elif data == "action_resume":
@@ -389,6 +488,26 @@ class TelegramControlBot:
                 await query.answer("Position not found or already closed.", show_alert=True)
             await self.positions_cmd(update, context)
 
+        elif data.startswith("pos_half_"):
+            pid = data.replace("pos_half_", "")
+            if self.worker and pid in self.worker.positions:
+                pos = self.worker.positions[pid]
+                half_vol = round(pos["volume"] / 2.0, 2)
+                if half_vol >= 0.01:
+                    client = self.worker.get_active_client()
+                    if client:
+                        try:
+                            await client.close_position(pid, volume=str(half_vol))
+                        except Exception as e:
+                            logger.error(f"Failed to close 50% on Exness: {e}")
+                    pos["volume"] = round(pos["volume"] - half_vol, 2)
+                    await query.answer(f"Closed {half_vol} lots (50%). Remaining: {pos['volume']} lots", show_alert=True)
+                else:
+                    await query.answer("Volume too small for partial close.", show_alert=True)
+            else:
+                await query.answer("Position not found.", show_alert=True)
+            await self.positions_cmd(update, context)
+
         elif data.startswith("pos_be_"):
             pid = data.replace("pos_be_", "")
             if self.worker and pid in self.worker.positions:
@@ -401,6 +520,24 @@ class TelegramControlBot:
                     except Exception as e:
                         logger.error(f"Failed to update SL to BE on Exness: {e}")
                 await query.answer(f"Stop loss moved to Breakeven @ {pos['open_price']:.2f}", show_alert=True)
+            else:
+                await query.answer("Position not found.", show_alert=True)
+
+        elif data.startswith("pos_trail_"):
+            pid = data.replace("pos_trail_", "")
+            if self.worker and pid in self.worker.positions:
+                pos = self.worker.positions[pid]
+                cur_price = self.worker.current_bid if pos["direction"] == "buy" else self.worker.current_ask
+                # 3.0 point ATR offset for Gold
+                new_sl = round(cur_price - 3.0, 2) if pos["direction"] == "buy" else round(cur_price + 3.0, 2)
+                pos["stop_loss"] = new_sl
+                client = self.worker.get_active_client()
+                if client:
+                    try:
+                        await client.update_position_sl_tp(pid, stop_loss_price=new_sl)
+                    except Exception as e:
+                        logger.error(f"Failed to trail SL on Exness: {e}")
+                await query.answer(f"Trailing SL adjusted to {new_sl:.2f}", show_alert=True)
             else:
                 await query.answer("Position not found.", show_alert=True)
 
@@ -462,8 +599,10 @@ class TelegramControlBot:
         )
         buttons = [
             [
-                InlineKeyboardButton(f"❌ Close #{pid}", callback_data=f"pos_close_{pid}"),
-                InlineKeyboardButton(f"🛡️ Move SL to BE", callback_data=f"pos_be_{pid}")
+                InlineKeyboardButton(f"❌ Close", callback_data=f"pos_close_{pid}"),
+                InlineKeyboardButton(f"✂️ 50%", callback_data=f"pos_half_{pid}"),
+                InlineKeyboardButton(f"🛡️ BE", callback_data=f"pos_be_{pid}"),
+                InlineKeyboardButton(f"⚡ Trail", callback_data=f"pos_trail_{pid}")
             ],
             [InlineKeyboardButton("📊 View Open Positions", callback_data="menu_positions")]
         ]
@@ -515,11 +654,106 @@ class TelegramControlBot:
         except Exception as e:
             logger.error(f"Failed to send Telegram notification: {e}")
 
+    async def check_price_alerts(self, current_price: float):
+        if not self.app or not self.owner_id or not self.price_alerts:
+            return
+        hit_alerts = []
+        for target, note in list(self.price_alerts.items()):
+            if abs(current_price - target) <= 0.75:
+                hit_alerts.append(target)
+                badge = self._get_badge()
+                text = (
+                    f"🎯🚨 <b>GOLD PRICE TARGET REACHED!</b> 🚨🎯\n"
+                    f"Platform: {badge}\n\n"
+                    f"Current Bid: <b>${current_price:.2f}</b>\n"
+                    f"Target Alert: <b>${target:.2f}</b>\n"
+                    f"Note: {note}\n\n"
+                    f"Review market conditions or manage open exposure."
+                )
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=self.owner_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=self._get_main_keyboard()
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send price alert: {e}")
+        for h in hit_alerts:
+            self.price_alerts.pop(h, None)
+
+    async def check_upcoming_news_warning(self):
+        if not self.app or not self.owner_id or not self.worker:
+            return
+        upcoming = self.worker.news_engine.get_upcoming_events(limit=3)
+        now = datetime.datetime.utcnow()
+        for ev in upcoming:
+            ev_id = ev.get("id") or ev.get("event_name")
+            if ev_id in self.last_news_notified:
+                continue
+            ev_time = ev.get("event_time")
+            if isinstance(ev_time, str):
+                try:
+                    ev_time = datetime.datetime.fromisoformat(ev_time)
+                except Exception:
+                    continue
+            if isinstance(ev_time, datetime.datetime):
+                delta_mins = (ev_time - now).total_seconds() / 60.0
+                if 0 <= delta_mins <= 15:
+                    self.last_news_notified.add(ev_id)
+                    badge = self._get_badge()
+                    text = (
+                        f"⚠️📰 <b>HIGH-IMPACT NEWS WARNING (T-{int(delta_mins)} mins)</b> 📰⚠️\n"
+                        f"Platform: {badge}\n\n"
+                        f"Event: <b>{ev.get('event_name')} ({ev.get('currency')})</b>\n"
+                        f"Scheduled: <b>{ev_time.strftime('%H:%M UTC')}</b>\n"
+                        f"Forecast: <b>{ev.get('forecast')}</b> | Previous: <b>{ev.get('previous')}</b>\n\n"
+                        f"🛡️ <i>The system will enforce entry blackout windows to protect capital from news spikes.</i>"
+                    )
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=self.owner_id,
+                            text=text,
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send news warning: {e}")
+
+    async def send_session_briefing(self, session_name: str):
+        if not self.app or not self.owner_id or not self.worker:
+            return
+        badge = self._get_badge()
+        st = self.risk_engine.get_state()
+        cur_bid = self.worker.current_bid
+        pos_count = len(self.worker.positions)
+        ai_data = self.worker.last_ai_analysis
+        text = (
+            f"🌅 <b>Session Market Briefing: {session_name}</b>\n"
+            f"Active: {badge}\n\n"
+            f"• XAU/USD Bid: <b>${cur_bid:.2f}</b>\n"
+            f"• Market Bias: <b>{ai_data.get('trading_bias', 'Neutral')}</b> ({float(ai_data.get('confidence_score', 0.0))*100:.0f}% confidence)\n"
+            f"• Today's PnL: <b>${st['daily_pnl']:.2f}</b> ({st['daily_trade_count']} trades)\n"
+            f"• Open Positions: <b>{pos_count}</b>\n"
+            f"• Risk Allowed: <b>{st['max_risk_pct']}% / trade</b> (Loss cap: {st['max_daily_loss_pct']}%)\n\n"
+            f"Good luck in the session ahead, Commander!"
+        )
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.owner_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=self._get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Failed to send session briefing: {e}")
+
     def register_handlers(self, app: Application):
         self.app = app
         app.add_handler(CommandHandler(["start", "menu"], self.start_cmd))
         app.add_handler(CommandHandler("help", self.help_cmd))
         app.add_handler(CommandHandler("status", self.status_cmd))
+        app.add_handler(CommandHandler("performance", self.performance_cmd))
+        app.add_handler(CommandHandler("alert", self.alert_cmd))
         app.add_handler(CommandHandler("mode", self.mode_cmd))
         app.add_handler(CommandHandler("positions", self.positions_cmd))
         app.add_handler(CommandHandler("rules", self.rules_cmd))
