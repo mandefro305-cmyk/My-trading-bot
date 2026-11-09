@@ -329,6 +329,46 @@ class TelegramControlBot:
         ]
         await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
+    async def balance_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        st = self.risk_engine.get_state()
+        active_client = self.worker.get_active_client() if self.worker else None
+        acc_id = active_client.account_id if active_client else "Not Configured"
+        badge = self._get_badge()
+        summary = await active_client.get_account_summary(force_refresh=True) if active_client else {}
+        is_synced = summary.get("is_live_synced", False)
+
+        if is_synced:
+            live_bal = float(summary.get("balance", st["daily_starting_equity"]))
+            live_eq = float(summary.get("equity", live_bal))
+            margin = float(summary.get("margin", 0.0))
+            free_margin = float(summary.get("free_margin", live_eq - margin))
+            status_text = "🟢 Live Exness Synced"
+        else:
+            live_bal = float(st["daily_starting_equity"])
+            live_eq = live_bal + float(st["daily_pnl"])
+            margin = 0.0
+            free_margin = live_eq
+            status_text = "🟡 Paper / Fallback Synced"
+
+        text = (
+            f"💰 <b>Broker Balance & Margin Summary</b> {badge}\n\n"
+            f"• Platform: <b>Exness ({status_text})</b>\n"
+            f"• Account ID: <code>#{acc_id}</code>\n"
+            f"• Balance: <b>${live_bal:.2f} USD</b>\n"
+            f"• Equity: <b>${live_eq:.2f} USD</b>\n"
+            f"• Used Margin: <b>${margin:.2f} USD</b>\n"
+            f"• Free Margin: <b>${free_margin:.2f} USD</b>\n"
+            f"• Daily Net P&L: <b>${st['daily_pnl']:.2f} USD</b>\n"
+            f"• Active Positions: <b>{len(self.worker.positions if self.worker else {})}</b>"
+        )
+        buttons = [
+            [InlineKeyboardButton("📈 View Positions", callback_data="menu_positions")],
+            [InlineKeyboardButton("🔄 Refresh Balance", callback_data="menu_status"), InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+        ]
+        await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
     async def mode_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_owner(update):
             return
@@ -513,8 +553,22 @@ class TelegramControlBot:
         if not self._is_owner(update):
             return
         badge = self._get_badge()
+
+        # Trigger immediate broker sync if active client exists
+        client = self.worker.get_active_client() if self.worker else None
+        if client and self.worker:
+            try:
+                await self.worker._sync_account_and_market()
+            except Exception:
+                pass
+
         positions = self.worker.positions if self.worker else {}
-        if not positions:
+        # Filter out invalid entries
+        valid_positions = {k: v for k, v in positions.items() if k and str(k).lower() != "none"}
+        if self.worker:
+            self.worker.positions = valid_positions
+
+        if not valid_positions:
             text = f"📈 <b>Active Open Positions</b> {badge}\n\nNo open positions at this moment."
             buttons = [
                 [InlineKeyboardButton("🎯 Place Manual Trade", callback_data="menu_manual_trade")],
@@ -525,14 +579,21 @@ class TelegramControlBot:
 
         bid = self.worker.current_bid if self.worker else 2900.0
         ask = self.worker.current_ask if self.worker else 2900.25
-        text = f"📈 <b>Active Open Positions</b> ({len(positions)}) {badge}\n\n"
+        text = f"📈 <b>Active Open Positions</b> ({len(valid_positions)}) {badge}\n\n"
         buttons = []
-        for pid, pos in positions.items():
-            pnl = (bid - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - ask) * pos["volume"] * 100.0
+        for pid, pos in valid_positions.items():
+            # Use broker reported profit if available; otherwise calculate via bid/ask
+            if "broker_profit" in pos and pos["broker_profit"] != 0.0:
+                pnl = float(pos["broker_profit"])
+            else:
+                pnl = (bid - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - ask) * pos["volume"] * 100.0
             pnl_sign = "+" if pnl >= 0 else ""
+            sl_str = f"${pos['stop_loss']:.2f}" if pos.get('stop_loss', 0) > 0 else "None"
+            tp_str = f"${pos['take_profit_1']:.2f}" if pos.get('take_profit_1', 0) > 0 else "None"
+
             text += (
-                f"• <b>#{pid}</b>: {pos['direction'].upper()} {pos['volume']} lots @ {pos['open_price']:.2f}\n"
-                f"  SL: {pos['stop_loss']:.2f} | TP1: {pos['take_profit_1']:.2f} | PnL: <b>{pnl_sign}${pnl:.2f}</b>\n\n"
+                f"• <b>Ticket #{pid}</b>: <b>{pos['direction'].upper()} {pos['volume']} lots</b> @ ${pos['open_price']:.2f}\n"
+                f"  SL: {sl_str} | TP: {tp_str} | PnL: <b>{pnl_sign}${pnl:.2f} USD</b>\n\n"
             )
             buttons.append([
                 InlineKeyboardButton(f"❌ Close #{pid}", callback_data=f"pos_close_{pid}"),
@@ -1101,6 +1162,7 @@ class TelegramControlBot:
         app.add_handler(CommandHandler(["start", "menu"], self.start_cmd))
         app.add_handler(CommandHandler("help", self.help_cmd))
         app.add_handler(CommandHandler("status", self.status_cmd))
+        app.add_handler(CommandHandler(["balance", "equity"], self.balance_cmd))
         app.add_handler(CommandHandler("chart", self.chart_cmd))
         app.add_handler(CommandHandler("performance", self.performance_cmd))
         app.add_handler(CommandHandler("alert", self.alert_cmd))

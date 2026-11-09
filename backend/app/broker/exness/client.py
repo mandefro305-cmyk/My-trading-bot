@@ -393,12 +393,36 @@ class ExnessClient:
         }
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
-        """Fetch active open positions directly from official snapshot."""
+        """Fetch active open positions directly from official snapshot, normalizing fields."""
         if not self.account_id:
             return []
         try:
             snapshot = await self.get_trading_snapshot()
-            return snapshot.get("positions", [])
+            raw_positions = snapshot.get("positions", [])
+            normalized = []
+            for p in raw_positions:
+                pid = str(p.get("position_id") or p.get("id") or p.get("ticket") or "")
+                if not pid or pid.lower() == "none":
+                    continue
+                side = str(p.get("side") or p.get("direction") or "buy").lower()
+                vol = float(p.get("volume") or p.get("lots") or 0.01)
+                open_p = float(p.get("open_price") or p.get("price") or 0.0)
+                sl = float(p.get("stop_loss_price") or p.get("stop_loss") or 0.0)
+                tp = float(p.get("take_profit_price") or p.get("take_profit") or 0.0)
+                pnl = float(p.get("profit") or p.get("unrealized_pnl") or p.get("pnl") or 0.0)
+                normalized.append({
+                    "position_id": pid,
+                    "id": pid,
+                    "instrument": p.get("instrument") or p.get("symbol") or "XAUUSD",
+                    "side": side,
+                    "direction": side,
+                    "volume": vol,
+                    "open_price": open_p,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "profit": pnl
+                })
+            return normalized
         except Exception as e:
             logger.debug(f"Exness get_open_positions note: {e}")
             return []
