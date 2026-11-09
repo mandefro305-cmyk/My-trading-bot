@@ -101,11 +101,18 @@ class BackgroundWorker:
     async def start(self):
         self.running = True
         self.news_engine.populate_seed_events_if_empty()
+        # Start WebSocket streaming for real-time Exness ticks
+        client = self.get_active_client()
+        if client:
+            client.start_websocket_stream(settings.SYMBOL)
         await self.telegram_bot.start_polling()
         self._loop_task = asyncio.create_task(self._main_loop())
 
     async def stop(self):
         self.running = False
+        client = self.get_active_client()
+        if client:
+            client.stop_websocket_stream()
         if self._loop_task:
             self._loop_task.cancel()
         await self.telegram_bot.stop()

@@ -104,6 +104,10 @@ class TelegramControlBot:
         candles = []
         if client:
             try:
+                quote = await client.get_quote(settings.SYMBOL)
+                if quote.get("bid", 0.0) > 0:
+                    self.worker.current_bid = quote["bid"]
+                    self.worker.current_ask = quote["ask"]
                 candles = await client.get_candles(settings.SYMBOL, timeframe="M5", count=35)
             except Exception:
                 pass
