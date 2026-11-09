@@ -284,20 +284,29 @@ class TelegramControlBot:
         ask = self.worker.current_ask if self.worker else 2900.25
         summary = await active_client.get_account_summary() if active_client else {}
         is_synced = summary.get("is_live_synced", False)
+        last_err = summary.get("last_error") or (active_client.last_sync_error if active_client else None)
+        access_point = getattr(active_client, "access_point", None)
+
         if is_synced:
             live_bal = float(summary.get("balance", st["daily_starting_equity"]))
             live_eq = float(summary.get("equity", live_bal))
             margin = float(summary.get("margin", 0.0))
+            sync_status = "🟢 Connected (Live API Synced)"
         else:
             live_bal = float(st["daily_starting_equity"])
             live_eq = live_bal + float(st["daily_pnl"])
             margin = 0.0
+            sync_status = "🟡 Standby (Local / Fallback Mode)"
 
-        sync_status = "🟢 Connected (Live API Synced)" if is_synced else "🟡 Standby (Local / Fallback Mode)"
+        err_note = ""
+        if not is_synced and last_err and "None" not in str(last_err):
+            err_note = f"\n• <i>Sync Diagnostic:</i> <code>{str(last_err)[:120]}</code>"
+        if access_point:
+            err_note += f"\n• <i>Access Point:</i> <code>{access_point}</code>"
 
         text = (
             f"📊 <b>Account & System Status</b> {badge}\n\n"
-            f"• Exness Connection: <b>{sync_status}</b>\n"
+            f"• Exness Connection: <b>{sync_status}</b>{err_note}\n"
             f"• Account ID: <code>{acc_id}</code>\n"
             f"• Balance: <b>${live_bal:.2f}</b> | Equity: <b>${live_eq:.2f}</b>\n"
             f"• Used Margin: <b>${margin:.2f}</b>\n"

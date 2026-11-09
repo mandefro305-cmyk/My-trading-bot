@@ -25,7 +25,7 @@ class ExnessClient:
     - Historical candle data via GET /v1/market-data/accounts/{id}/candles
     - Real-time tick quotes via official WebSocket stream /v1/market-data/accounts/{id}/ws
     """
-    GATEWAY_HOSTS = ["https://api.exness.com", "https://api.exness-api.com", "https://api.exness.org"]
+    GATEWAY_HOSTS = ["https://api.exness.com", "https://api.exness-api.com"]
 
     def __init__(
         self,
@@ -42,6 +42,10 @@ class ExnessClient:
         self.last_sync_error: Optional[str] = None
         self.last_sync_time: Optional[float] = None
         self.is_connected: bool = False
+
+        # Account-specific discovered Access Point
+        self.access_point: Optional[str] = None
+        self.discovery_resolved: bool = False
 
         # Backoff & rate limit handling
         self.rate_limit_backoff_until: float = 0.0
@@ -125,15 +129,61 @@ class ExnessClient:
             body=body
         )
 
+    async def resolve_access_point(self, force: bool = False) -> Optional[str]:
+        """
+        Discovers and caches the dedicated account Access Point URL via GET /v1/trading/access-point?account_id={id}
+        as mandated by the official Exness Developer documentation.
+        """
+        if self.access_point and not force:
+            return self.access_point
+        if not self.account_id:
+            return None
+
+        path_with_query = f"/v1/trading/access-point?account_id={self.account_id}"
+        for gateway in self.gateway_hosts:
+            url = f"{gateway}{path_with_query}"
+            headers = self._get_headers(method="GET", path=path_with_query, idempotency_key="")
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ap = data.get("access_point")
+                        if ap and isinstance(ap, str):
+                            self.access_point = ap.rstrip("/")
+                            self.discovery_resolved = True
+                            logger.info(f"Discovered Exness Access Point for account {self.account_id}: {self.access_point}")
+                            return self.access_point
+                    elif resp.status_code == 429:
+                        logger.warning(f"Exness discovery rate-limited on {gateway}")
+            except Exception as e:
+                logger.debug(f"Discovery check failed on {gateway}: {e}")
+
+        return self.access_point
+
     async def _request(self, method: str, path: str, idempotency_key: str = "", body: Optional[Any] = None) -> httpx.Response:
-        """Sends signed request with rate limit backoff across official Exness hosts."""
+        """Sends signed request with rate limit backoff using discovered Access Point or Gateway hosts."""
         now = time.time()
         if now < self.rate_limit_backoff_until:
             wait_remaining = int(self.rate_limit_backoff_until - now)
             raise RuntimeError(f"Exness rate limit backoff active ({wait_remaining}s remaining)")
 
+        # Attempt to resolve account Access Point if not yet discovered
+        if not self.discovery_resolved and self.account_id:
+            try:
+                await self.resolve_access_point()
+            except Exception:
+                pass
+
+        target_hosts = []
+        if self.access_point:
+            target_hosts.append(self.access_point)
+        for host in self.gateway_hosts:
+            if host not in target_hosts:
+                target_hosts.append(host)
+
         last_exception = None
-        for base in self.gateway_hosts:
+        for base in target_hosts:
             url = f"{base}{path}"
             headers = self._get_headers(method=method, path=path, idempotency_key=idempotency_key, body=body)
             try:
@@ -191,21 +241,26 @@ class ExnessClient:
             self._ws_task = None
 
     async def _run_websocket_stream(self, symbol: str = "XAUUSD"):
-        """Maintains persistent WebSocket connection to Exness market-data stream."""
+        """Maintains persistent WebSocket connection to Exness market-data stream via discovered Access Point."""
         import websockets
         import json
 
-        ws_host = self.current_base_url.replace("https://", "wss://").replace("http://", "ws://")
-        ws_url = f"{ws_host}/v1/market-data/accounts/{self.account_id}/ws"
-
         while self._ws_running:
             try:
-                headers = self._get_headers("GET", f"/v1/market-data/accounts/{self.account_id}/ws")
-                # Remove Content-Type for WS handshake
+                if not self.access_point and self.account_id:
+                    await self.resolve_access_point()
+
+                base = self.access_point or self.current_base_url
+                ws_host = base.replace("https://", "wss://").replace("http://", "ws://")
+                ws_path = f"/v1/server-events/accounts/{self.account_id}/ws/ticks"
+                ws_url = f"{ws_host}{ws_path}"
+
+                headers = self._get_headers("GET", ws_path)
                 headers.pop("Content-Type", None)
+
                 async with websockets.connect(ws_url, extra_headers=headers, ping_interval=20) as ws:
-                    # Subscribe to symbol
-                    sub_msg = {"action": "subscribe", "instruments": [symbol, f"{symbol}m", "XAUUSD"]}
+                    # Subscribe to ticks for symbol
+                    sub_msg = {"id": f"sub-ticks-{int(time.time())}", "subscribe": {"event": "ticks", "instruments": [symbol, f"{symbol}m", "XAUUSD"]}}
                     await ws.send(json.dumps(sub_msg))
                     self.is_connected = True
 
@@ -214,8 +269,8 @@ class ExnessClient:
                             break
                         try:
                             msg = json.loads(message)
-                            # Handle tick quote message
-                            if msg.get("type") in ["quote", "tick", "price"]:
+                            # Handle tick message
+                            if msg.get("instrument") in [symbol, f"{symbol}m", "XAUUSD"] or msg.get("event_type") == "tick":
                                 bid = float(msg.get("bid", 0.0))
                                 ask = float(msg.get("ask", 0.0))
                                 if bid > 0 and ask > 0:
