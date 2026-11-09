@@ -130,7 +130,7 @@ class BackgroundWorker:
                 await self.telegram_bot.check_upcoming_news_warning()
 
                 # Session briefings at London Open (07:00 UTC) and NY Open (13:00 UTC)
-                now_utc = datetime.datetime.utcnow()
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
                 if now_utc.hour in [7, 13] and now_utc.hour != last_briefing_hour:
                     session_name = "London Open 🇬🇧" if now_utc.hour == 7 else "New York Open 🇺🇸"
                     await self.telegram_bot.send_session_briefing(session_name)
@@ -147,17 +147,25 @@ class BackgroundWorker:
     async def _sync_account_and_market(self):
         client = self.get_active_client()
         if client:
+            # 1. Update quote (never let quote failure block account sync or position checks)
             try:
                 quote = await client.get_quote(settings.SYMBOL)
                 self.current_bid = quote.get("bid", self.current_bid)
                 self.current_ask = quote.get("ask", self.current_ask)
+            except Exception as e:
+                logger.debug(f"Market quote sync note: {e}")
 
+            # 2. Update account summary & balance
+            try:
                 summary = await client.get_account_summary()
                 if summary.get("is_live_synced"):
                     bal = float(summary.get("balance", self.risk_engine.daily_starting_equity))
                     self.risk_engine.daily_starting_equity = bal
+            except Exception as e:
+                logger.debug(f"Account summary sync note: {e}")
 
-                # Sync open positions from Exness
+            # 3. Sync open positions from Exness
+            try:
                 ex_positions = await client.get_open_positions()
                 if ex_positions:
                     for p in ex_positions:
@@ -178,7 +186,7 @@ class BackgroundWorker:
                                 "tp2_hit": False
                             }
             except Exception as e:
-                logger.debug(f"Exness sync note: {e}")
+                logger.debug(f"Exness open positions sync note: {e}")
 
     async def _manage_positions(self):
         client = self.get_active_client()
@@ -243,7 +251,7 @@ class BackgroundWorker:
                             pnl=pnl,
                             status="CLOSED",
                             close_reason=act.get("reason", "CLOSED"),
-                            closed_at=datetime.datetime.utcnow()
+                            closed_at=datetime.datetime.now(datetime.timezone.utc)
                         )
                         db.add(t)
                         db.commit()

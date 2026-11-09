@@ -25,7 +25,7 @@ class ExnessClient:
     - Historical candle data via GET /v1/market-data/accounts/{id}/candles
     - Real-time tick quotes via official WebSocket stream /v1/market-data/accounts/{id}/ws
     """
-    GATEWAY_HOSTS = ["https://api.exness.com", "https://api.exness-api.com"]
+    GATEWAY_HOSTS = ["https://api.exness.com", "https://api.exness-api.com", "https://api.exness.org"]
 
     def __init__(
         self,
@@ -45,13 +45,17 @@ class ExnessClient:
 
         # Backoff & rate limit handling
         self.rate_limit_backoff_until: float = 0.0
-        self.backoff_duration: float = 30.0
+        self.backoff_duration: float = 15.0
 
         # Caching to avoid hammering broker endpoints
         self._cached_quote: Dict[str, Any] = {}
         self._quote_cache_time: float = 0.0
         self._cached_candles: Dict[str, Any] = {}
         self._candles_cache_time: Dict[str, float] = {}
+        self._cached_snapshot: Optional[Dict[str, Any]] = None
+        self._snapshot_cache_time: float = 0.0
+        self._cached_summary: Optional[Dict[str, Any]] = None
+        self._summary_cache_time: float = 0.0
 
         # WebSocket background listener task
         self._ws_task: Optional[asyncio.Task] = None
@@ -153,9 +157,14 @@ class ExnessClient:
                         return resp
                     elif resp.status_code == 429:
                         # Rate limit triggered: backoff
-                        self.rate_limit_backoff_until = time.time() + self.backoff_duration
-                        logger.warning(f"Exness returned HTTP 429 (Rate Limited). Pausing requests for {self.backoff_duration}s.")
-                        self.backoff_duration = min(300.0, self.backoff_duration * 2)
+                        retry_after = resp.headers.get("Retry-After")
+                        try:
+                            cooldown = float(retry_after) if retry_after else self.backoff_duration
+                        except ValueError:
+                            cooldown = self.backoff_duration
+                        self.rate_limit_backoff_until = time.time() + cooldown
+                        logger.warning(f"Exness returned HTTP 429 (Rate Limited). Backing off for {cooldown}s.")
+                        self.backoff_duration = min(60.0, self.backoff_duration * 1.5)
                         resp.raise_for_status()
                     else:
                         logger.debug(f"Exness API returned HTTP {resp.status_code} for {url}")
@@ -220,16 +229,33 @@ class ExnessClient:
                 logger.debug(f"Exness WebSocket stream note: {e}")
                 await asyncio.sleep(10.0)
 
-    async def get_trading_snapshot(self) -> Dict[str, Any]:
-        """Fetch trading snapshot containing account_state, open orders, and open positions."""
+    async def get_trading_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """Fetch trading snapshot containing account_state, open orders, and open positions with 25s cache."""
+        now = time.time()
+        if not force_refresh and self._cached_snapshot and (now - self._snapshot_cache_time < 25.0):
+            return self._cached_snapshot
+
         if not self.account_id:
             return {}
         path = f"/v1/trading/accounts/{self.account_id}/snapshot"
-        resp = await self._request("GET", path)
-        return resp.json()
+        try:
+            resp = await self._request("GET", path)
+            data = resp.json()
+            self._cached_snapshot = data
+            self._snapshot_cache_time = now
+            return data
+        except Exception as e:
+            logger.debug(f"Snapshot fetch note: {e}")
+            if self._cached_snapshot:
+                return self._cached_snapshot
+            raise
 
-    async def get_account_summary(self) -> Dict[str, Any]:
-        """Fetch real-time account monetary balance, equity, and margin from Exness."""
+    async def get_account_summary(self, force_refresh: bool = False) -> Dict[str, Any]:
+        """Fetch real-time account monetary balance, equity, and margin from Exness with cache fallback."""
+        now = time.time()
+        if not force_refresh and self._cached_summary and (now - self._summary_cache_time < 25.0):
+            return self._cached_summary
+
         if not self.account_id:
             return {
                 "account_id": "NOT_CONFIGURED",
@@ -243,27 +269,33 @@ class ExnessClient:
                 "is_live_synced": False
             }
 
+        # 1. Try snapshot endpoint
         try:
-            snapshot = await self.get_trading_snapshot()
+            snapshot = await self.get_trading_snapshot(force_refresh=force_refresh)
             acct_state = snapshot.get("account_state", {})
-            balance = float(acct_state.get("balance", 0.0))
-            equity = float(acct_state.get("equity", balance))
-            margin = float(acct_state.get("used_margin", 0.0))
-            free_margin = max(0.0, equity - margin)
-            return {
-                "account_id": self.account_id,
-                "balance": balance,
-                "equity": equity,
-                "margin": margin,
-                "free_margin": free_margin,
-                "currency": "USD",
-                "leverage": "1:2000",
-                "status": "ACTIVE",
-                "is_live_synced": True
-            }
+            if "balance" in acct_state or "equity" in acct_state:
+                balance = float(acct_state.get("balance", 0.0))
+                equity = float(acct_state.get("equity", balance))
+                margin = float(acct_state.get("used_margin", 0.0))
+                free_margin = max(0.0, equity - margin)
+                res = {
+                    "account_id": self.account_id,
+                    "balance": balance,
+                    "equity": equity,
+                    "margin": margin,
+                    "free_margin": free_margin,
+                    "currency": "USD",
+                    "leverage": "1:2000",
+                    "status": "ACTIVE",
+                    "is_live_synced": True
+                }
+                self._cached_summary = res
+                self._summary_cache_time = now
+                return res
         except Exception as e:
             logger.debug(f"Snapshot query note: {e}")
 
+        # 2. Try configuration accounts endpoint if snapshot didn't return balance
         try:
             path = f"/v1/configuration/accounts/{self.account_id}/account"
             resp = await self._request("GET", path)
@@ -271,7 +303,7 @@ class ExnessClient:
             balance = float(data.get("balance", 0.0))
             equity = float(data.get("equity", balance))
             margin = float(data.get("margin", 0.0))
-            return {
+            res = {
                 "account_id": self.account_id,
                 "balance": balance,
                 "equity": equity,
@@ -282,8 +314,15 @@ class ExnessClient:
                 "status": data.get("account_status", "ACTIVE"),
                 "is_live_synced": True
             }
+            self._cached_summary = res
+            self._summary_cache_time = now
+            return res
         except Exception as e:
             logger.debug(f"Exness account sync note: {e}")
+
+        # If rate-limited or transient network error, retain existing cache if present
+        if self._cached_summary:
+            return self._cached_summary
 
         return {
             "account_id": self.account_id,

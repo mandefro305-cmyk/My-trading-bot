@@ -102,7 +102,9 @@ class ICTChartRenderer:
 
         plt.tight_layout()
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
-        plt.close(fig)
-        buf.seek(0)
-        return buf
+        try:
+            plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), edgecolor="none")
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)

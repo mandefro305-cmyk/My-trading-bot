@@ -63,7 +63,9 @@ class NewsEngine:
         for ev in self.in_memory_events:
             if ev["impact"] == "HIGH" and ev["currency"] == "USD":
                 try:
-                    ev_time = datetime.datetime.fromisoformat(ev["event_time"])
+                    ev_time = datetime.datetime.fromisoformat(ev["event_time"].replace("Z", "+00:00"))
+                    if ev_time.tzinfo is None:
+                        ev_time = ev_time.replace(tzinfo=datetime.timezone.utc)
                     if (current_time - datetime.timedelta(minutes=self.blackout_after)) <= ev_time <= (current_time + datetime.timedelta(minutes=self.blackout_before)):
                         return True, f"High-impact news active: {ev['event_name']}"
                 except Exception:

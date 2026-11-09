@@ -282,10 +282,26 @@ class TelegramControlBot:
         badge = self._get_badge()
         bid = self.worker.current_bid if self.worker else 2900.0
         ask = self.worker.current_ask if self.worker else 2900.25
+        summary = await active_client.get_account_summary() if active_client else {}
+        is_synced = summary.get("is_live_synced", False)
+        if is_synced:
+            live_bal = float(summary.get("balance", st["daily_starting_equity"]))
+            live_eq = float(summary.get("equity", live_bal))
+            margin = float(summary.get("margin", 0.0))
+        else:
+            live_bal = float(st["daily_starting_equity"])
+            live_eq = live_bal + float(st["daily_pnl"])
+            margin = 0.0
+
+        sync_status = "🟢 Connected (Live API Synced)" if is_synced else "🟡 Standby (Local / Fallback Mode)"
+
         text = (
             f"📊 <b>Account & System Status</b> {badge}\n\n"
+            f"• Exness Connection: <b>{sync_status}</b>\n"
             f"• Account ID: <code>{acc_id}</code>\n"
-            f"• Bid: <b>{bid:.2f}</b> | Ask: <b>{ask:.2f}</b>\n"
+            f"• Balance: <b>${live_bal:.2f}</b> | Equity: <b>${live_eq:.2f}</b>\n"
+            f"• Used Margin: <b>${margin:.2f}</b>\n"
+            f"• Gold Bid: <b>${bid:.2f}</b> | Ask: <b>${ask:.2f}</b>\n"
             f"• Starting Equity: <b>${st['daily_starting_equity']:.2f}</b>\n"
             f"• Today's PnL: <b>${st['daily_pnl']:.2f}</b> ({st['daily_loss_pct']} / {st['max_daily_loss_pct']}% max)\n"
             f"• Trades Today: <b>{st['daily_trade_count']}</b> / {st['max_trades_per_day']}\n"
@@ -801,7 +817,7 @@ class TelegramControlBot:
         if not self.app or not self.owner_id or not self.worker:
             return
         upcoming = self.worker.news_engine.get_upcoming_events(limit=3)
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         for ev in upcoming:
             ev_id = ev.get("id") or ev.get("event_name")
             if ev_id in self.last_news_notified:
@@ -809,10 +825,13 @@ class TelegramControlBot:
             ev_time = ev.get("event_time")
             if isinstance(ev_time, str):
                 try:
-                    ev_time = datetime.datetime.fromisoformat(ev_time)
+                    ev_time = datetime.datetime.fromisoformat(ev_time.replace("Z", "+00:00"))
                 except Exception:
                     continue
             if isinstance(ev_time, datetime.datetime):
+                # Ensure ev_time is timezone-aware UTC for subtraction
+                if ev_time.tzinfo is None:
+                    ev_time = ev_time.replace(tzinfo=datetime.timezone.utc)
                 delta_mins = (ev_time - now).total_seconds() / 60.0
                 if 0 <= delta_mins <= 15:
                     self.last_news_notified.add(ev_id)
