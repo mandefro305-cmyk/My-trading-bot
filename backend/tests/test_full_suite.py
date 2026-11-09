@@ -126,3 +126,20 @@ def test_risk_position_sizing_guard():
     allowed, lots, reason = re.calculate_position_size(equity=500.0, entry_price=2900.0, stop_loss=2890.0)
     assert allowed is False
     assert "exceeds" in reason or lots == 0.0
+
+def test_ict_smc_strategy_analysis_execution():
+    from backend.app.strategy.ict_smc.strategy import MultiTimeframeStrategyEngine
+    import pandas as pd
+
+    engine = MultiTimeframeStrategyEngine()
+
+    # Generate 60 test candles for H4, H1, M15, M5
+    candles_h4 = [{"open": 2000.0, "high": 2010.0, "low": 1990.0, "close": 2005.0, "volume": 100.0} for _ in range(60)]
+    candles_h1 = [{"open": 2000.0, "high": 2010.0, "low": 1990.0, "close": 2005.0, "volume": 100.0} for _ in range(60)]
+    candles_m15 = [{"open": 2000.0, "high": 2010.0, "low": 1990.0, "close": 2005.0, "volume": 100.0} for _ in range(60)]
+    candles_m5 = [{"open": 2000.0, "high": 2010.0, "low": 1990.0, "close": 2005.0, "volume": 100.0} for _ in range(60)]
+
+    # Ensure analyze runs without any KeyError
+    res = engine.analyze(candles_h4, candles_h1, candles_m15, candles_m5, current_bid=2005.0, current_ask=2005.3)
+    # Result can be None or dict, but must not crash
+    assert res is None or isinstance(res, dict)

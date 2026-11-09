@@ -57,9 +57,9 @@ class ICTSMCDetector:
         shs = swing_points["swing_highs"]
         sls = swing_points["swing_lows"]
         if shs and recent_close > shs[-1]["price"]:
-            return {"type": "BULLISH_MSS", "direction": "BUY"}
+            return {"type": "BULLISH_MSS", "direction": "BUY", "level": shs[-1]["price"]}
         elif sls and recent_close < sls[-1]["price"]:
-            return {"type": "BEARISH_MSS", "direction": "SELL"}
+            return {"type": "BEARISH_MSS", "direction": "SELL", "level": sls[-1]["price"]}
         return None
 
     @staticmethod
@@ -67,4 +67,14 @@ class ICTSMCDetector:
         equilibrium = (high + low) / 2.0
         zone = "PREMIUM" if current_price > equilibrium else "DISCOUNT"
         pct = ((current_price - low) / (high - low)) * 100.0 if high != low else 50.0
-        return {"high": high, "low": low, "equilibrium": round(equilibrium, 2), "zone": zone, "percent": round(pct, 1)}
+        discount_depth = max(0.0, (equilibrium - current_price) / (equilibrium - low)) if equilibrium != low else 0.0
+        premium_depth = max(0.0, (current_price - equilibrium) / (high - equilibrium)) if high != equilibrium else 0.0
+        return {
+            "high": high,
+            "low": low,
+            "equilibrium": round(equilibrium, 2),
+            "zone": zone,
+            "percent": round(pct, 1),
+            "discount_depth": round(discount_depth, 2),
+            "premium_depth": round(premium_depth, 2)
+        }

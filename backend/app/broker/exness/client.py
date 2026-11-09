@@ -25,7 +25,7 @@ class ExnessClient:
     - Real-time candle data via GET /v1/market-data/accounts/{id}/candles
     - Real-time instrument quotes via GET /v1/market-data/accounts/{id}/quotes
     """
-    DEFAULT_HOSTS = ["https://api.exness.com", "https://api.exness-api.com"]
+    GATEWAY_HOSTS = ["https://api.exness-api.com", "https://api.exness.com"]
 
     def __init__(
         self,
@@ -43,6 +43,10 @@ class ExnessClient:
         self.last_sync_time: Optional[float] = None
         self.is_connected: bool = False
 
+        # Access point dynamic discovery & caching
+        self.discovered_access_point: Optional[str] = None
+        self.last_discovery_time: float = 0.0
+
         # Backoff & rate limit handling
         self.rate_limit_backoff_until: float = 0.0
         self.backoff_duration: float = 30.0
@@ -53,13 +57,13 @@ class ExnessClient:
         self._cached_candles: Dict[str, Any] = {}
         self._candles_cache_time: Dict[str, float] = {}
 
-        self.base_urls = []
+        self.gateway_hosts = []
         if base_url and "exness-trader.com" not in base_url:
-            self.base_urls.append(base_url.rstrip("/"))
-        for host in self.DEFAULT_HOSTS:
-            if host not in self.base_urls:
-                self.base_urls.append(host)
-        self.current_base_url = self.base_urls[0]
+            self.gateway_hosts.append(base_url.rstrip("/"))
+        for host in self.GATEWAY_HOSTS:
+            if host not in self.gateway_hosts:
+                self.gateway_hosts.append(host)
+        self.current_base_url = self.gateway_hosts[0]
 
         if private_key_b64:
             self.private_key = self._load_private_key(private_key_b64)
@@ -117,15 +121,65 @@ class ExnessClient:
             body=body
         )
 
+    async def discover_access_point(self, force_refresh: bool = False) -> str:
+        """
+        Resolves the dedicated regional Access Point host for the trading account.
+        Calls GET /v1/trading/access-point?account_id={account_id} on the Gateway host.
+        Caches the resolved Access Point for 1 hour to prevent discovery rate-limiting.
+        """
+        now = time.time()
+        if not force_refresh and self.discovered_access_point and (now - self.last_discovery_time) < 3600:
+            return self.discovered_access_point
+
+        if not self.account_id or not self.private_key or not self.api_key:
+            return self.gateway_hosts[0]
+
+        discovery_path = f"/v1/trading/access-point?account_id={self.account_id}"
+        headers = self._get_headers(method="GET", path=discovery_path, idempotency_key="")
+
+        last_err = None
+        for host in self.gateway_hosts:
+            url = f"{host}{discovery_path}"
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ap = data.get("access_point")
+                        if ap and isinstance(ap, str):
+                            self.discovered_access_point = ap.rstrip("/")
+                            self.last_discovery_time = now
+                            self.current_base_url = self.discovered_access_point
+                            logger.info(f"Discovered Exness Access Point for account {self.account_id}: {self.discovered_access_point}")
+                            return self.discovered_access_point
+                    elif resp.status_code == 429:
+                        logger.warning(f"Exness Gateway returned 429 during access point discovery on {host}")
+                    else:
+                        logger.debug(f"Exness Gateway discovery returned HTTP {resp.status_code} on {host}: {resp.text[:150]}")
+            except Exception as e:
+                last_err = e
+                logger.debug(f"Discovery failed on gateway host {host}: {e}")
+
+        # Fallback to configured gateway if discovery couldn't resolve
+        fallback = self.discovered_access_point or self.gateway_hosts[0]
+        return fallback
+
     async def _request(self, method: str, path: str, idempotency_key: str = "", body: Optional[Any] = None) -> httpx.Response:
-        """Sends signed request with rate limit backoff and automatic host failover."""
+        """Sends signed request with rate limit backoff and dynamic access point routing."""
         now = time.time()
         if now < self.rate_limit_backoff_until:
             wait_remaining = int(self.rate_limit_backoff_until - now)
             raise RuntimeError(f"Exness rate limit backoff active ({wait_remaining}s remaining)")
 
+        # Always ensure Access Point is discovered for account requests
+        target_host = await self.discover_access_point()
+        hosts_to_try = [target_host]
+        for g in self.gateway_hosts:
+            if g not in hosts_to_try:
+                hosts_to_try.append(g)
+
         last_exception = None
-        for base in self.base_urls:
+        for base in hosts_to_try:
             url = f"{base}{path}"
             headers = self._get_headers(method=method, path=path, idempotency_key=idempotency_key, body=body)
             try:
@@ -148,10 +202,14 @@ class ExnessClient:
                         self.backoff_duration = 30.0  # Reset backoff on success
                         return resp
                     elif resp.status_code == 429:
-                        # Rate limit triggered by Exness or Cloudflare: backoff
+                        # Rate limit triggered: backoff
                         self.rate_limit_backoff_until = time.time() + self.backoff_duration
                         logger.warning(f"Exness returned HTTP 429 (Rate Limited). Pausing requests for {self.backoff_duration}s.")
                         self.backoff_duration = min(300.0, self.backoff_duration * 2)
+                        resp.raise_for_status()
+                    elif resp.status_code == 404 and base == target_host and self.discovered_access_point:
+                        # Access point might be stale or path changed
+                        logger.debug(f"404 received on Access Point {base}{path}")
                         resp.raise_for_status()
                     else:
                         logger.debug(f"Exness API returned HTTP {resp.status_code} for {url}")

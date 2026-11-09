@@ -49,8 +49,8 @@ class MultiTimeframeStrategyEngine:
         df_m15 = self.indicators.enrich_candles(m15_candles)
         m15_swings = self.detector.identify_swing_points(df_m15, window=3)
         m15_sweeps = self.detector.detect_liquidity_sweeps(df_m15, m15_swings)
-        recent_ssl_sweep = any(s.get("sweep_type") == "SSL_SWEEP" for s in m15_sweeps[-5:]) if m15_sweeps else False
-        recent_bsl_sweep = any(s.get("sweep_type") == "BSL_SWEEP" for s in m15_sweeps[-5:]) if m15_sweeps else False
+        recent_ssl_sweep = any(s.get("type") == "SSL_SWEEP" or s.get("sweep_type") == "SSL_SWEEP" for s in m15_sweeps[-5:]) if m15_sweeps else False
+        recent_bsl_sweep = any(s.get("type") == "BSL_SWEEP" or s.get("sweep_type") == "BSL_SWEEP" for s in m15_sweeps[-5:]) if m15_sweeps else False
 
         # 4. M5 Entry Confirmation: Market Structure Shift & Displacement
         df_m5 = self.indicators.enrich_candles(m5_candles)
