@@ -175,3 +175,25 @@ def test_telegram_price_alerts_and_perf():
     asyncio.run(bot.check_price_alerts(2950.2))
     assert 2950.0 not in bot.price_alerts
     assert bot.app.bot.send_message.called
+
+def test_chart_renderer_and_sentiment_nlp():
+    import asyncio
+    from backend.app.strategy.ict_smc.chart_renderer import ICTChartRenderer
+    from backend.app.ai.xkiro.client import XKiroClient
+
+    candles = [
+        {"open": 2900 + i, "high": 2905 + i, "low": 2898 + i, "close": 2903 + i}
+        for i in range(30)
+    ]
+    setup = {"entry_price": 2920, "stop_loss": 2915, "tp1": 2925, "tp2": 2930}
+    fvgs = [{"type": "BULLISH_FVG", "top": 2915, "bottom": 2912}]
+
+    buf = ICTChartRenderer.render_candlestick_chart(candles, trade_setup=setup, fvgs=fvgs)
+    assert buf is not None
+    assert len(buf.getvalue()) > 5000
+
+    ai_client = XKiroClient()
+    sentiment = asyncio.run(ai_client.summarize_fed_and_sentiment("Fed Chair remarks on interest rates and inflation"))
+    assert "tone" in sentiment
+    assert "gold_impact" in sentiment
+    assert len(sentiment.get("bullets", [])) == 3

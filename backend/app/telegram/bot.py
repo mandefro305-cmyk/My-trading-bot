@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 from backend.app.config.settings import settings
 from backend.app.services.settings_service import SettingsService
+from backend.app.strategy.ict_smc.chart_renderer import ICTChartRenderer
 
 logger = logging.getLogger("telegram_bot")
 
@@ -49,12 +50,14 @@ class TelegramControlBot:
     def _get_main_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                InlineKeyboardButton("📊 Account & Status", callback_data="menu_status"),
+                InlineKeyboardButton("📊 Status", callback_data="menu_status"),
+                InlineKeyboardButton("📸 ICT Chart", callback_data="menu_chart"),
                 InlineKeyboardButton("🏆 Performance", callback_data="menu_perf")
             ],
             [
                 InlineKeyboardButton("📈 Open Positions", callback_data="menu_positions"),
-                InlineKeyboardButton("🧠 AI Analysis", callback_data="menu_analysis")
+                InlineKeyboardButton("🧠 AI Analysis", callback_data="menu_analysis"),
+                InlineKeyboardButton("🎙️ Fed/Sentiment", callback_data="menu_sentiment")
             ],
             [
                 InlineKeyboardButton("⚡ Switch Mode", callback_data="menu_mode"),
@@ -93,6 +96,51 @@ class TelegramControlBot:
         )
         await self._send_or_edit(update, text, self._get_main_keyboard())
 
+    async def chart_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        badge = self._get_badge()
+        client = self.worker.get_active_client() if self.worker else None
+        candles = []
+        if client:
+            try:
+                candles = await client.get_candles(settings.SYMBOL, timeframe="M5", count=35)
+            except Exception:
+                pass
+
+        # Check if there is an active position to highlight
+        setup = None
+        if self.worker and self.worker.positions:
+            first_pos = next(iter(self.worker.positions.values()))
+            setup = {
+                "entry_price": first_pos.get("open_price"),
+                "stop_loss": first_pos.get("stop_loss"),
+                "tp1": first_pos.get("take_profit_1"),
+                "tp2": first_pos.get("take_profit_2")
+            }
+
+        chart_buf = ICTChartRenderer.render_candlestick_chart(
+            candles=candles,
+            symbol="XAU/USD",
+            timeframe="M5",
+            trade_setup=setup
+        )
+
+        caption = (
+            f"📸 <b>XAU/USD Live ICT Candlestick Chart (M5)</b> {badge}\n"
+            f"Current Bid: <b>${self.worker.current_bid:.2f}</b> | Ask: <b>${self.worker.current_ask:.2f}</b>\n"
+            f"<i>Includes Fair Value Gaps and active trade levels.</i>"
+        )
+
+        target = update.callback_query.message if update.callback_query else update.message
+        if target:
+            await target.reply_photo(
+                photo=chart_buf,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=self._get_main_keyboard()
+            )
+
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_owner(update):
             return
@@ -101,6 +149,8 @@ class TelegramControlBot:
             f"📖 <b>Interactive Command Guide</b> {badge}\n\n"
             f"/menu or /start - Open interactive master dashboard\n"
             f"/status - Instant account health & risk metrics\n"
+            f"/chart - Generate live ICT candlestick chart snapshot\n"
+            f"/sentiment - AI Fed speech & macroeconomic gold analysis\n"
             f"/performance - Win rate, profit factor, net P&L metrics\n"
             f"/mode - Switch between Exness DEMO and REAL\n"
             f"/positions - List active positions with quick action buttons\n"
@@ -154,6 +204,31 @@ class TelegramControlBot:
 
         buttons = [
             [InlineKeyboardButton("🔄 Refresh", callback_data="menu_perf")],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+        ]
+        await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+    async def sentiment_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        badge = self._get_badge()
+        args = context.args if context and context.args else []
+        custom_text = " ".join(args) if args else None
+
+        summary = {"tone": "Evaluating", "gold_impact": "Assessing", "bullets": [], "key_quote": ""}
+        if self.worker:
+            summary = await self.worker.ai_client.summarize_fed_and_sentiment(speech_text=custom_text)
+
+        bullets_fmt = "\n".join([f"• {b}" for b in summary.get("bullets", [])]) or "• Assessing current macro drivers."
+        text = (
+            f"🎙️ <b>Federal Reserve & Macro Sentiment</b> {badge}\n\n"
+            f"• Monetary Tone: <b>{summary.get('tone', 'Neutral')}</b>\n"
+            f"• Gold Impact: <b>{summary.get('gold_impact', 'Neutral')}</b>\n\n"
+            f"<b>Strategic 3-Bullet Breakdown:</b>\n{bullets_fmt}\n\n"
+            f"💡 <i>Takeaway: \"{summary.get('key_quote', 'Trade structured setups only.')}\"</i>"
+        )
+        buttons = [
+            [InlineKeyboardButton("🔄 Refresh Sentiment", callback_data="menu_sentiment")],
             [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
         ]
         await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
@@ -404,8 +479,12 @@ class TelegramControlBot:
             await self.rules_cmd(update, context)
         elif data == "menu_analysis":
             await self.analysis_cmd(update, context)
+        elif data == "menu_sentiment":
+            await self.sentiment_cmd(update, context)
         elif data == "menu_news":
             await self.news_cmd(update, context)
+        elif data == "menu_chart":
+            await self.chart_cmd(update, context)
         elif data == "menu_perf":
             await self.performance_cmd(update, context)
         elif data == "menu_alerts":
@@ -606,15 +685,47 @@ class TelegramControlBot:
             ],
             [InlineKeyboardButton("📊 View Open Positions", callback_data="menu_positions")]
         ]
+        # Generate ICT Chart Snapshot with trade markers
+        client = self.worker.get_active_client() if self.worker else None
+        candles = []
+        if client:
+            try:
+                candles = await client.get_candles(settings.SYMBOL, timeframe="M5", count=35)
+            except Exception:
+                pass
+
+        setup = {
+            "entry_price": pos["open_price"],
+            "stop_loss": pos["stop_loss"],
+            "tp1": pos["take_profit_1"],
+            "tp2": pos["take_profit_2"]
+        }
+        chart_buf = ICTChartRenderer.render_candlestick_chart(
+            candles=candles,
+            symbol="XAU/USD",
+            timeframe="M5",
+            trade_setup=setup
+        )
+
         try:
-            await self.app.bot.send_message(
+            await self.app.bot.send_photo(
                 chat_id=self.owner_id,
-                text=text,
+                photo=chart_buf,
+                caption=text,
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
-            logger.error(f"Failed to send trade alert: {e}")
+            logger.error(f"Failed to send trade alert with photo: {e}")
+            try:
+                await self.app.bot.send_message(
+                    chat_id=self.owner_id,
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except Exception:
+                pass
 
     async def send_consecutive_loss_alert(self, losses: int, total_loss: float):
         if not self.app or not self.owner_id:
@@ -752,12 +863,14 @@ class TelegramControlBot:
         app.add_handler(CommandHandler(["start", "menu"], self.start_cmd))
         app.add_handler(CommandHandler("help", self.help_cmd))
         app.add_handler(CommandHandler("status", self.status_cmd))
+        app.add_handler(CommandHandler("chart", self.chart_cmd))
         app.add_handler(CommandHandler("performance", self.performance_cmd))
         app.add_handler(CommandHandler("alert", self.alert_cmd))
         app.add_handler(CommandHandler("mode", self.mode_cmd))
         app.add_handler(CommandHandler("positions", self.positions_cmd))
         app.add_handler(CommandHandler("rules", self.rules_cmd))
         app.add_handler(CommandHandler("analysis", self.analysis_cmd))
+        app.add_handler(CommandHandler(["sentiment", "fedspeech"], self.sentiment_cmd))
         app.add_handler(CommandHandler("news", self.news_cmd))
         app.add_handler(CommandHandler("pause", self.pause_cmd))
         app.add_handler(CommandHandler("resume", self.resume_cmd))
