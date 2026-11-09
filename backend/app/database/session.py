@@ -10,8 +10,19 @@ if db_url.startswith("postgres://"):
 elif db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
     db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 
-connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
-engine = create_engine(db_url, connect_args=connect_args)
+if db_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+    engine = create_engine(db_url, connect_args=connect_args)
+else:
+    # Managed PostgreSQL configuration: auto-reconnect dropped connections & recycle every 5 minutes
+    engine = create_engine(
+        db_url,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=10,
+        max_overflow=20
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

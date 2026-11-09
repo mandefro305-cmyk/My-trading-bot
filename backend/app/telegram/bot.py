@@ -289,10 +289,16 @@ class TelegramControlBot:
         if not query:
             return
         if not self._is_owner(update):
-            await query.answer("Unauthorized", show_alert=True)
+            try:
+                await query.answer("Unauthorized", show_alert=True)
+            except Exception:
+                pass
             return
 
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass
         data = query.data
 
         if data == "menu_main":

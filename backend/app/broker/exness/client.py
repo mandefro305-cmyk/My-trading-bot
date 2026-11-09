@@ -2,6 +2,7 @@ import base64
 import uuid
 import logging
 import asyncio
+import time
 from typing import Dict, Any, List, Optional
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -15,6 +16,7 @@ class ExnessClient:
     Official Exness Trading API Client (v1.0.2 conforming to OpenAPI specification):
     - Uses DNS hostnames: https://api.exness.com (Main) and https://api.exness-api.com (Alternative)
     - Full Ed25519 cryptographic request signing (EXN-API-KEY, EXN-DATA, EXN-SIGN, etc.)
+    - Rate-limit protection: Exponential backoff on HTTP 429 and response caching
     - Account monetary state & active positions via GET /v1/trading/accounts/{id}/snapshot
     - Market position opening via POST /v1/trading/accounts/{id}/positions
     - Position closing & partial closing via DELETE /v1/trading/accounts/{id}/positions/{id}?volume=...
@@ -40,6 +42,16 @@ class ExnessClient:
         self.last_sync_error: Optional[str] = None
         self.last_sync_time: Optional[float] = None
         self.is_connected: bool = False
+
+        # Backoff & rate limit handling
+        self.rate_limit_backoff_until: float = 0.0
+        self.backoff_duration: float = 30.0
+
+        # Caching to avoid hammering broker endpoints
+        self._cached_quote: Dict[str, Any] = {}
+        self._quote_cache_time: float = 0.0
+        self._cached_candles: Dict[str, Any] = {}
+        self._candles_cache_time: Dict[str, float] = {}
 
         self.base_urls = []
         if base_url and "exness-trader.com" not in base_url:
@@ -106,7 +118,12 @@ class ExnessClient:
         )
 
     async def _request(self, method: str, path: str, idempotency_key: str = "", body: Optional[Any] = None) -> httpx.Response:
-        """Sends signed request with automatic host failover between api.exness.com and api.exness-api.com."""
+        """Sends signed request with rate limit backoff and automatic host failover."""
+        now = time.time()
+        if now < self.rate_limit_backoff_until:
+            wait_remaining = int(self.rate_limit_backoff_until - now)
+            raise RuntimeError(f"Exness rate limit backoff active ({wait_remaining}s remaining)")
+
         last_exception = None
         for base in self.base_urls:
             url = f"{base}{path}"
@@ -128,9 +145,16 @@ class ExnessClient:
                         self.current_base_url = base
                         self.is_connected = True
                         self.last_sync_error = None
+                        self.backoff_duration = 30.0  # Reset backoff on success
                         return resp
+                    elif resp.status_code == 429:
+                        # Rate limit triggered by Exness or Cloudflare: backoff
+                        self.rate_limit_backoff_until = time.time() + self.backoff_duration
+                        logger.warning(f"Exness returned HTTP 429 (Rate Limited). Pausing requests for {self.backoff_duration}s.")
+                        self.backoff_duration = min(300.0, self.backoff_duration * 2)
+                        resp.raise_for_status()
                     else:
-                        logger.warning(f"Exness API returned HTTP {resp.status_code} for {url}: {resp.text[:300]}")
+                        logger.debug(f"Exness API returned HTTP {resp.status_code} for {url}")
                         resp.raise_for_status()
             except Exception as e:
                 last_exception = e
@@ -182,7 +206,7 @@ class ExnessClient:
                 "is_live_synced": True
             }
         except Exception as e:
-            logger.debug(f"Snapshot query failed: {e}")
+            logger.debug(f"Snapshot query note: {e}")
 
         try:
             path = f"/v1/configuration/accounts/{self.account_id}/account"
@@ -203,7 +227,7 @@ class ExnessClient:
                 "is_live_synced": True
             }
         except Exception as e:
-            logger.warning(f"Exness account sync failed: {e}")
+            logger.debug(f"Exness account sync note: {e}")
 
         return {
             "account_id": self.account_id,
@@ -226,7 +250,7 @@ class ExnessClient:
             snapshot = await self.get_trading_snapshot()
             return snapshot.get("positions", [])
         except Exception as e:
-            logger.warning(f"Exness get_open_positions failed: {e}")
+            logger.debug(f"Exness get_open_positions note: {e}")
             return []
 
     async def open_position(
@@ -239,7 +263,6 @@ class ExnessClient:
     ) -> Dict[str, Any]:
         """
         Open position with immediate market execution via POST /v1/trading/accounts/{id}/positions.
-        Exness returns ACK with operation_id. We await confirmed status.
         """
         path = f"/v1/trading/accounts/{self.account_id}/positions"
         body = {
@@ -262,7 +285,7 @@ class ExnessClient:
 
     async def close_position(self, position_id: str, volume: Optional[str] = None) -> Dict[str, Any]:
         """
-        Closes position (or partially closes with volume) via DELETE /v1/trading/accounts/{id}/positions/{id}.
+        Closes position via DELETE /v1/trading/accounts/{id}/positions/{id}.
         """
         path = f"/v1/trading/accounts/{self.account_id}/positions/{position_id}"
         if volume:
@@ -297,7 +320,7 @@ class ExnessClient:
         resp = await self._request("POST", path, idempotency_key=f"gh-{uuid.uuid4().hex[:12]}", body=body)
         return resp.json()
 
-    async def poll_operation_status(self, operation_id: str, max_retries: int = 5, delay: float = 0.5) -> Dict[str, Any]:
+    async def poll_operation_status(self, operation_id: str, max_retries: int = 4, delay: float = 1.0) -> Dict[str, Any]:
         """Polls GET /v1/trading/accounts/{id}/operations/{id} until confirmed, rejected, or failed."""
         path = f"/v1/trading/accounts/{self.account_id}/operations/{operation_id}"
         for _ in range(max_retries):
@@ -313,14 +336,18 @@ class ExnessClient:
         return {"operation_id": operation_id, "status": "pending_timeout"}
 
     async def get_quote(self, symbol: str = "XAUUSD") -> Dict[str, float]:
-        """Fetch latest bid/ask quote directly from Exness market data endpoint."""
+        """Fetch latest bid/ask quote directly from Exness with short caching."""
+        now = time.time()
+        if self._cached_quote and (now - self._quote_cache_time) < 10.0:
+            return self._cached_quote
+
         symbols_to_try = [symbol]
         if "XAUUSD" in symbol and "m" not in symbol:
             symbols_to_try.append(symbol + "m")
         elif "m" in symbol:
             symbols_to_try.append(symbol.replace("m", ""))
 
-        if self.account_id:
+        if self.account_id and now > self.rate_limit_backoff_until:
             for sym in symbols_to_try:
                 path = f"/v1/market-data/accounts/{self.account_id}/quotes?instrument={sym}"
                 try:
@@ -329,27 +356,36 @@ class ExnessClient:
                     bid = float(data.get("bid", 0.0))
                     ask = float(data.get("ask", 0.0))
                     if bid > 0 and ask > 0:
-                        return {"bid": bid, "ask": ask}
+                        self._cached_quote = {"bid": bid, "ask": ask}
+                        self._quote_cache_time = now
+                        return self._cached_quote
                 except Exception:
                     pass
 
-        return {"bid": 0.0, "ask": 0.0}
+        return self._cached_quote or {"bid": 0.0, "ask": 0.0}
 
     async def get_candles(self, symbol: str = "XAUUSD", timeframe: str = "M5", count: int = 60) -> List[Dict[str, Any]]:
-        """Fetch historical candles directly from Exness market data endpoint."""
+        """Fetch historical candles directly from Exness with 30-second caching."""
+        now = time.time()
+        cache_key = f"{symbol}_{timeframe}_{count}"
+        if cache_key in self._cached_candles and (now - self._candles_cache_time.get(cache_key, 0.0)) < 30.0:
+            return self._cached_candles[cache_key]
+
         symbols_to_try = [symbol]
         if "XAUUSD" in symbol and "m" not in symbol:
             symbols_to_try.append(symbol + "m")
 
-        if self.account_id:
+        if self.account_id and now > self.rate_limit_backoff_until:
             for sym in symbols_to_try:
                 path = f"/v1/market-data/accounts/{self.account_id}/candles?instrument={sym}&timeframe={timeframe}&price_type=bid&count={count}"
                 try:
                     resp = await self._request("GET", path)
                     candles = resp.json().get("candles", [])
                     if candles:
+                        self._cached_candles[cache_key] = candles
+                        self._candles_cache_time[cache_key] = now
                         return candles
                 except Exception:
                     pass
 
-        return []
+        return self._cached_candles.get(cache_key, [])

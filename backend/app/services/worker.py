@@ -116,12 +116,13 @@ class BackgroundWorker:
                 await self._sync_account_and_market()
                 await self._manage_positions()
                 await self._scan_market()
-                await asyncio.sleep(3.0)
+                # Throttled to 15 seconds to stay comfortably within Exness and Cloudflare rate limits
+                await asyncio.sleep(15.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Worker main loop iteration error: {e}")
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(15.0)
 
     async def _sync_account_and_market(self):
         client = self.get_active_client()
