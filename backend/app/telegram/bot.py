@@ -50,6 +50,11 @@ class TelegramControlBot:
     def _get_main_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
+                InlineKeyboardButton("🟢 Quick BUY", callback_data="prep_manual_buy"),
+                InlineKeyboardButton("🔴 Quick SELL", callback_data="prep_manual_sell"),
+                InlineKeyboardButton("🎯 Manual Trade", callback_data="menu_manual_trade")
+            ],
+            [
                 InlineKeyboardButton("📊 Status", callback_data="menu_status"),
                 InlineKeyboardButton("📸 ICT Chart", callback_data="menu_chart"),
                 InlineKeyboardButton("🏆 Performance", callback_data="menu_perf")
@@ -340,6 +345,170 @@ class TelegramControlBot:
         ]
         await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
+    async def manual_trade_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_owner(update):
+            return
+        badge = self._get_badge()
+        bid = self.worker.current_bid if self.worker else 2900.0
+        ask = self.worker.current_ask if self.worker else 2900.25
+        st = self.risk_engine.get_state()
+
+        text = (
+            f"🎯 <b>Manual Trading Terminal</b> {badge}\n\n"
+            f"• Instrument: <b>{settings.SYMBOL}</b>\n"
+            f"• Current Bid: <b>${bid:.2f}</b> | Ask: <b>${ask:.2f}</b>\n"
+            f"• Risk per trade: <b>{st['max_risk_pct'] * 100:.1f}%</b> (auto lot calculation)\n"
+            f"• Automatic 3-Stage Profit Engine: <b>TP1 (1R 40% + BE), TP2 (2R 30%), TP3 (3R 30%)</b>\n\n"
+            f"<b>Fast Command Examples:</b>\n"
+            f"• <code>/buy</code> (Auto-size lots & ATR SL)\n"
+            f"• <code>/sell</code> (Auto-size lots & ATR SL)\n"
+            f"• <code>/buy 0.02 sl=2900.0 tp=2930.0</code>\n"
+            f"• <code>/buylimit 2895.0 sl=2888.0 tp=2920.0</code>\n\n"
+            f"Choose an instant execution action below:"
+        )
+        buttons = [
+            [
+                InlineKeyboardButton("🟢 Quick Market BUY", callback_data="prep_manual_buy"),
+                InlineKeyboardButton("🔴 Quick Market SELL", callback_data="prep_manual_sell")
+            ],
+            [
+                InlineKeyboardButton("📸 View Live Chart", callback_data="menu_chart"),
+                InlineKeyboardButton("🧠 AI Second Opinion", callback_data="manual_ai_check")
+            ],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+        ]
+        await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+    async def prep_manual_trade(self, update: Update, context: ContextTypes.DEFAULT_TYPE, side: str):
+        if not self._is_owner(update):
+            return
+        badge = self._get_badge()
+        side = side.lower()
+        entry_price = self.worker.current_ask if side == "buy" else self.worker.current_bid
+        st = self.risk_engine.get_state()
+
+        # Calculate estimated SL & lots
+        default_dist = 4.0
+        sl_price = round(entry_price - default_dist if side == "buy" else entry_price + default_dist, 2)
+        size_ok, calculated_lots, _ = self.risk_engine.calculate_position_size(
+            equity=st["daily_starting_equity"] + st["daily_pnl"],
+            entry_price=entry_price,
+            stop_loss=sl_price
+        )
+        lots = calculated_lots if size_ok and calculated_lots >= 0.01 else 0.01
+        tp1 = round(entry_price + default_dist if side == "buy" else entry_price - default_dist, 2)
+        tp2 = round(entry_price + 2.0 * default_dist if side == "buy" else entry_price - 2.0 * default_dist, 2)
+        tp3 = round(entry_price + 3.0 * default_dist if side == "buy" else entry_price - 3.0 * default_dist, 2)
+
+        # AI Quick Evaluation Check
+        ai_note = "Evaluating setup..."
+        try:
+            if self.worker:
+                ai_res = await self.worker.ai_client.analyze_market(
+                    symbol=settings.SYMBOL,
+                    current_price=entry_price,
+                    technical_summary={"direction": side.upper()}
+                )
+                ai_reason = getattr(ai_res, "reason", getattr(ai_res, "reasoning", "Market scan complete."))
+                ai_note = f"<b>{ai_res.market_direction}</b> ({ai_res.confidence_score * 100:.0f}% confidence): {ai_reason[:120]}"
+        except Exception:
+            ai_note = "Market scan complete."
+
+        dir_icon = "🟢" if side == "buy" else "🔴"
+        text = (
+            f"⚡ <b>CONFIRM MANUAL ORDER</b> {badge}\n\n"
+            f"• Direction: {dir_icon} <b>{side.upper()} XAU/USD</b>\n"
+            f"• Market Price: <b>${entry_price:.2f}</b>\n"
+            f"• Calculated Volume: <b>{lots} lots</b> (0.5% risk)\n"
+            f"• Stop Loss: <b>${sl_price:.2f}</b> (${default_dist:.2f} dist)\n"
+            f"• TP1 (40% + BE): <b>${tp1:.2f}</b>\n"
+            f"• TP2 (30%): <b>${tp2:.2f}</b>\n"
+            f"• TP3 (30%): <b>${tp3:.2f}</b>\n\n"
+            f"🧠 <b>AI Second Opinion:</b>\n{ai_note}\n\n"
+            f"Are you ready to send this order to broker execution?"
+        )
+        buttons = [
+            [InlineKeyboardButton(f"✅ CONFIRM {side.upper()}", callback_data=f"exec_manual_{side}_{lots}_{sl_price}_{tp2}")],
+            [InlineKeyboardButton("❌ Cancel Order", callback_data="menu_manual_trade")]
+        ]
+        await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
+
+    async def buy_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._parse_and_execute_manual_cmd(update, context, side="buy")
+
+    async def sell_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._parse_and_execute_manual_cmd(update, context, side="sell")
+
+    async def buylimit_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._parse_and_execute_manual_cmd(update, context, side="buy", is_pending=True)
+
+    async def selllimit_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._parse_and_execute_manual_cmd(update, context, side="sell", is_pending=True)
+
+    async def _parse_and_execute_manual_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE, side: str, is_pending: bool = False):
+        if not self._is_owner(update):
+            return
+        args = context.args or []
+        vol = None
+        sl = None
+        tp = None
+        pending_p = None
+
+        for arg in args:
+            arg = arg.strip()
+            if arg.startswith("sl="):
+                try:
+                    sl = float(arg.split("=")[1])
+                except ValueError:
+                    pass
+            elif arg.startswith("tp="):
+                try:
+                    tp = float(arg.split("=")[1])
+                except ValueError:
+                    pass
+            else:
+                try:
+                    val = float(arg)
+                    if val < 50.0 and vol is None:
+                        vol = val
+                    elif val >= 50.0 and is_pending and pending_p is None:
+                        pending_p = val
+                except ValueError:
+                    pass
+
+        if is_pending and not pending_p:
+            await update.message.reply_html(f"⚠️ <b>Usage:</b> <code>/{side}limit &lt;price&gt; [vol] [sl=&lt;val&gt;] [tp=&lt;val&gt;]</code>")
+            return
+
+        if not self.worker:
+            await update.message.reply_html("❌ Background worker not ready.")
+            return
+
+        status_msg = await update.message.reply_html(f"⏳ <i>Executing manual {side.upper()} order with broker...</i>")
+        res = await self.worker.open_manual_trade(
+            side=side,
+            volume=vol,
+            stop_loss=sl,
+            take_profit=tp,
+            is_pending=is_pending,
+            pending_price=pending_p
+        )
+        if res.get("success"):
+            pos = res.get("position", {})
+            await status_msg.edit_text(
+                f"✅ <b>Manual {side.upper()} Order Executed!</b>\n"
+                f"Position: <code>#{pos.get('id')}</code>\n"
+                f"Volume: <b>{pos.get('volume')} lots</b>\n"
+                f"Entry: <b>${pos.get('open_price'):.2f}</b>\n"
+                f"SL: <b>${pos.get('stop_loss'):.2f}</b>\n"
+                f"TP1 (1R 40% + BE): <b>${pos.get('take_profit_1'):.2f}</b>\n"
+                f"TP2 (2R 30%): <b>${pos.get('take_profit_2'):.2f}</b>\n"
+                f"TP3 (3R 30%): <b>${pos.get('take_profit_3'):.2f}</b>",
+                parse_mode="HTML"
+            )
+        else:
+            await status_msg.edit_text(f"❌ <b>Execution Failed:</b> {res.get('error')}", parse_mode="HTML")
+
     async def positions_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_owner(update):
             return
@@ -348,8 +517,8 @@ class TelegramControlBot:
         if not positions:
             text = f"📈 <b>Active Open Positions</b> {badge}\n\nNo open positions at this moment."
             buttons = [
-                [InlineKeyboardButton("🔄 Refresh", callback_data="menu_positions")],
-                [InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
+                [InlineKeyboardButton("🎯 Place Manual Trade", callback_data="menu_manual_trade")],
+                [InlineKeyboardButton("🔄 Refresh", callback_data="menu_positions"), InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")]
             ]
             await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
             return
@@ -360,9 +529,10 @@ class TelegramControlBot:
         buttons = []
         for pid, pos in positions.items():
             pnl = (bid - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - ask) * pos["volume"] * 100.0
+            pnl_sign = "+" if pnl >= 0 else ""
             text += (
                 f"• <b>#{pid}</b>: {pos['direction'].upper()} {pos['volume']} lots @ {pos['open_price']:.2f}\n"
-                f"  SL: {pos['stop_loss']:.2f} | TP1: {pos['take_profit_1']:.2f} | PnL: <b>${pnl:.2f}</b>\n\n"
+                f"  SL: {pos['stop_loss']:.2f} | TP1: {pos['take_profit_1']:.2f} | PnL: <b>{pnl_sign}${pnl:.2f}</b>\n\n"
             )
             buttons.append([
                 InlineKeyboardButton(f"❌ Close #{pid}", callback_data=f"pos_close_{pid}"),
@@ -370,7 +540,11 @@ class TelegramControlBot:
                 InlineKeyboardButton(f"🛡️ SL to BE", callback_data=f"pos_be_{pid}"),
                 InlineKeyboardButton(f"⚡ Trail ATR", callback_data=f"pos_trail_{pid}")
             ])
-        buttons.append([InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")])
+        buttons.append([
+            InlineKeyboardButton("🎯 Place Manual Trade", callback_data="menu_manual_trade"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="menu_positions"),
+            InlineKeyboardButton("🔙 Main Menu", callback_data="menu_main")
+        ])
         await self._send_or_edit(update, text, InlineKeyboardMarkup(buttons))
 
     async def rules_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -500,6 +674,38 @@ class TelegramControlBot:
             await self.start_cmd(update, context)
         elif data == "menu_status":
             await self.status_cmd(update, context)
+        elif data == "menu_manual_trade":
+            await self.manual_trade_menu(update, context)
+        elif data == "prep_manual_buy":
+            await self.prep_manual_trade(update, context, side="buy")
+        elif data == "prep_manual_sell":
+            await self.prep_manual_trade(update, context, side="sell")
+        elif data == "manual_ai_check":
+            await self.analysis_cmd(update, context)
+        elif data.startswith("exec_manual_"):
+            # format: exec_manual_{side}_{lots}_{sl}_{tp}
+            parts = data.split("_")
+            side = parts[2]
+            lots = float(parts[3])
+            sl = float(parts[4])
+            tp = float(parts[5])
+            if self.worker:
+                await query.answer(f"Sending {side.upper()} order...", show_alert=False)
+                res = await self.worker.open_manual_trade(side=side, volume=lots, stop_loss=sl, take_profit=tp)
+                if res.get("success"):
+                    await query.edit_message_text(
+                        f"✅ <b>Manual {side.upper()} Executed!</b>\n"
+                        f"Position: <code>#{res['position']['id']}</code>\n"
+                        f"Lots: <b>{lots}</b> | SL: <b>{sl}</b> | TP2: <b>{tp}</b>",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📈 View Positions", callback_data="menu_positions")]])
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"❌ <b>Execution Failed:</b> {res.get('error')}",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎯 Try Again", callback_data="menu_manual_trade")]])
+                    )
         elif data == "menu_mode":
             await self.mode_cmd(update, context)
         elif data == "menu_positions":
@@ -907,6 +1113,11 @@ class TelegramControlBot:
         app.add_handler(CommandHandler("pause", self.pause_cmd))
         app.add_handler(CommandHandler("resume", self.resume_cmd))
         app.add_handler(CommandHandler("closeall", self.closeall_cmd))
+        app.add_handler(CommandHandler("trade", self.manual_trade_menu))
+        app.add_handler(CommandHandler("buy", self.buy_cmd))
+        app.add_handler(CommandHandler("sell", self.sell_cmd))
+        app.add_handler(CommandHandler("buylimit", self.buylimit_cmd))
+        app.add_handler(CommandHandler("selllimit", self.selllimit_cmd))
         app.add_handler(CallbackQueryHandler(self.handle_callback_query))
 
     async def start_polling(self):

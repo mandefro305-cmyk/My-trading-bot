@@ -386,4 +386,149 @@ class BackgroundWorker:
         # Send interactive Telegram alert
         await self.telegram_bot.send_trade_alert(new_pos, ai_res)
 
+    async def open_manual_trade(
+        self,
+        side: str,
+        volume: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        take_profit: Optional[float] = None,
+        is_pending: bool = False,
+        pending_price: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a manual market or pending trade with deterministic risk sizing and 3-stage profit management.
+        """
+        client = self.get_active_client()
+        side = side.lower()
+        if side not in ["buy", "sell"]:
+            return {"success": False, "error": "Invalid order side. Must be BUY or SELL."}
+
+        # Check risk limits
+        st = self.risk_engine.get_state()
+        if not st["can_trade"]:
+            return {"success": False, "error": f"Trading restricted by risk engine. Daily loss: {st['daily_loss_pct']:.2f}%"}
+
+        current_entry = self.current_ask if side == "buy" else self.current_bid
+        if is_pending and pending_price:
+            entry_price = float(pending_price)
+        else:
+            entry_price = current_entry
+
+        # ATR / default SL and TP if not specified
+        default_sl_dist = 4.0  # $4.00 default gold SL distance if ATR unavailable
+        try:
+            m5 = await client.get_candles(settings.SYMBOL, timeframe="M5", count=20) if client else []
+            if m5 and len(m5) >= 14:
+                from backend.app.strategy.ict_smc.indicators import calculate_atr
+                atr_val = calculate_atr(m5, period=14)
+                if atr_val > 0.5:
+                    default_sl_dist = round(atr_val * 1.5, 2)
+        except Exception:
+            pass
+
+        if stop_loss is None or stop_loss <= 0:
+            stop_loss = round(entry_price - default_sl_dist if side == "buy" else entry_price + default_sl_dist, 2)
+
+        sl_distance = abs(entry_price - stop_loss)
+        if sl_distance <= 0.1:
+            return {"success": False, "error": "Stop loss is too close to entry price."}
+
+        # Calculate lot size
+        if volume is not None and volume >= 0.01:
+            lots = round(float(volume), 2)
+        else:
+            size_ok, calculated_lots, _ = self.risk_engine.calculate_position_size(
+                equity=st["daily_starting_equity"] + st["daily_pnl"],
+                entry_price=entry_price,
+                stop_loss=stop_loss
+            )
+            lots = calculated_lots if size_ok and calculated_lots >= 0.01 else 0.01
+
+        # 3-Stage TP Engine: TP1 = 1R (40%), TP2 = 2R (30%), TP3 = 3R (30%)
+        if side == "buy":
+            tp1 = round(entry_price + sl_distance, 2)
+            tp2 = round(entry_price + 2.0 * sl_distance, 2) if not take_profit else float(take_profit)
+            tp3 = round(entry_price + 3.0 * sl_distance, 2)
+        else:
+            tp1 = round(entry_price - sl_distance, 2)
+            tp2 = round(entry_price - 2.0 * sl_distance, 2) if not take_profit else float(take_profit)
+            tp3 = round(entry_price - 3.0 * sl_distance, 2)
+
+        # Transmit order to Exness
+        pos_id = None
+        if client:
+            try:
+                res = await client.open_position(
+                    symbol=settings.SYMBOL,
+                    side=side,
+                    volume=str(lots),
+                    stop_loss_price=str(stop_loss),
+                    take_profit_price=str(tp2)
+                )
+                if res and ("position" in res or "operation" in res or "ack" in res):
+                    pos_obj = res.get("position", {})
+                    op_obj = res.get("operation", {})
+                    if op_obj and op_obj.get("status") in ["rejected", "failed"]:
+                        return {"success": False, "error": f"Broker rejected order: {op_obj.get('error_message', 'Rejected')}"}
+                    pos_id = str(pos_obj.get("id") or op_obj.get("position_id") or res.get("ack", {}).get("position_id") or "")
+            except Exception as e:
+                logger.error(f"Manual order dispatch error: {e}")
+                return {"success": False, "error": f"Broker API execution error: {str(e)}"}
+
+        if not pos_id:
+            return {"success": False, "error": "Order could not be confirmed by broker."}
+
+        new_pos = {
+            "id": pos_id,
+            "symbol": settings.SYMBOL,
+            "direction": side,
+            "volume": lots,
+            "original_volume": lots,
+            "open_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit_1": tp1,
+            "take_profit_2": tp2,
+            "take_profit_3": tp3,
+            "tp1_hit": False,
+            "tp2_hit": False,
+            "is_manual": True
+        }
+        self.positions[pos_id] = new_pos
+
+        # Persist position in database
+        try:
+            db = SessionLocal()
+            pos_db = Position(
+                position_id=pos_id,
+                account_id=str(client.account_id if client else "exness-account"),
+                mode=self.trading_mode,
+                symbol=settings.SYMBOL,
+                direction=side.upper(),
+                initial_volume=lots,
+                current_volume=lots,
+                open_price=entry_price,
+                current_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=tp2,
+                state="OPEN"
+            )
+            db.add(pos_db)
+            db.commit()
+            db.close()
+        except Exception as db_err:
+            logger.error(f"Failed to persist manual position in DB: {db_err}")
+
+        # Send Telegram notification
+        await self.telegram_bot.send_notification(
+            f"🎯 <b>Manual {side.upper()} Order Executed!</b>\n\n"
+            f"• Position ID: <code>#{pos_id}</code>\n"
+            f"• Volume: <b>{lots} lots</b>\n"
+            f"• Entry: <b>${entry_price:.2f}</b>\n"
+            f"• SL: <b>${stop_loss:.2f}</b>\n"
+            f"• TP1 (40% + BE): <b>${tp1:.2f}</b>\n"
+            f"• TP2 (30%): <b>${tp2:.2f}</b>\n"
+            f"• TP3 (30%): <b>${tp3:.2f}</b>"
+        )
+        return {"success": True, "position": new_pos}
+
 worker = BackgroundWorker()
