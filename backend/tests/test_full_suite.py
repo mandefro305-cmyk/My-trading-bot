@@ -143,3 +143,14 @@ def test_ict_smc_strategy_analysis_execution():
     res = engine.analyze(candles_h4, candles_h1, candles_m15, candles_m5, current_bid=2005.0, current_ask=2005.3)
     # Result can be None or dict, but must not crash
     assert res is None or isinstance(res, dict)
+
+def test_telegram_control_bot_initialization():
+    from backend.app.telegram.bot import TelegramControlBot
+    from backend.app.risk.engine import RiskEngine
+    from backend.app.config.settings import settings
+    risk = RiskEngine()
+    bot = TelegramControlBot(risk)
+    assert bot.owner_id == settings.TELEGRAM_OWNER_ID
+    assert bot._get_badge() in ["🔴 <b>[EXNESS REAL]</b>", "🟡 <b>[EXNESS DEMO]</b>"]
+    kb = bot._get_main_keyboard()
+    assert len(kb.inline_keyboard) > 0

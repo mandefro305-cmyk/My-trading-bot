@@ -139,14 +139,12 @@ def handle_controls(req: ControlReq):
         return {"status": "MODE_CHANGED" if success else "MODE_CHANGE_REJECTED", "mode": worker.trading_mode}
     return {"status": "OK"}
 
-# Serve frontend build if dist folder exists
-frontend_dist = os.path.join(os.getcwd(), "frontend", "dist")
-if os.path.exists(frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        file_path = os.path.join(frontend_dist, full_path)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+@app.get("/")
+def root():
+    return {
+        "service": "GoldHunter AI Trading Engine",
+        "status": "RUNNING",
+        "control_center": "Telegram Bot",
+        "trading_mode": worker.trading_mode,
+        "health": "/health"
+    }
