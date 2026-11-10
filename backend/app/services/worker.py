@@ -182,6 +182,14 @@ class BackgroundWorker:
                         tp = float(p.get("take_profit", 0.0))
                         profit = float(p.get("profit", 0.0))
 
+                        # Derive direct broker tick rate from live position valuation if available
+                        if vol > 0 and open_p > 0 and profit != 0.0:
+                            multiplier = vol * 100.0
+                            implied_bid = open_p + (profit / multiplier) if direction == "buy" else open_p - (profit / multiplier)
+                            if 2000.0 < implied_bid < 10000.0:
+                                self.current_bid = round(implied_bid, 2)
+                                self.current_ask = round(implied_bid + 0.25, 2)
+
                         if pid not in self.positions:
                             self.positions[pid] = {
                                 "id": pid,
@@ -447,9 +455,11 @@ class BackgroundWorker:
             m5 = await client.get_candles(settings.SYMBOL, timeframe="M5", count=20) if client else []
             if m5 and len(m5) >= 14:
                 from backend.app.strategy.ict_smc.indicators import TechnicalIndicators
-                atr_val = TechnicalIndicators.calculate_atr(m5, period=14)
-                if atr_val and atr_val > 0.5:
-                    default_sl_dist = round(atr_val * 1.5, 2)
+                df_enriched = TechnicalIndicators.enrich_candles(m5)
+                if not df_enriched.empty and "atr" in df_enriched and not pd.isna(df_enriched["atr"].iloc[-1]):
+                    atr_val = float(df_enriched["atr"].iloc[-1])
+                    if atr_val > 0.5:
+                        default_sl_dist = round(atr_val * 1.5, 2)
         except Exception:
             pass
 

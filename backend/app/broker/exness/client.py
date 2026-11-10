@@ -512,14 +512,61 @@ class ExnessClient:
     async def get_quote(self, symbol: str = "XAUUSD") -> Dict[str, float]:
         """
         Fetch latest bid/ask quote.
-        Uses WebSocket stream cache if available; otherwise falls back to institutional interbank feed.
+        1. Uses WebSocket stream cache if available and fresh (< 12 seconds).
+        2. Derives direct live tick from open Exness position if active.
+        3. Probes Exness M1 candle endpoint directly.
+        4. Falls back to authentic real-time Spot Gold (XAU/USD) interbank feed.
         """
         now = time.time()
-        # If WebSocket streaming is running and has a recent quote (< 15 seconds), return it
-        if self._cached_quote and (now - self._quote_cache_time) < 15.0:
+        if self._cached_quote and (now - self._quote_cache_time) < 12.0:
             return self._cached_quote
 
-        # Fallback to institutional real-time interbank feed
+        # 2. Derive direct Exness tick price from open position profit if available
+        try:
+            snapshot = self._cached_snapshot
+            if snapshot and "positions" in snapshot:
+                for p in snapshot["positions"]:
+                    inst = str(p.get("instrument") or p.get("symbol") or "")
+                    if "XAU" in inst.upper() or "GOLD" in inst.upper() or inst == symbol:
+                        open_p = float(p.get("open_price") or p.get("price") or 0.0)
+                        vol = float(p.get("volume") or p.get("lots") or 0.0)
+                        profit = float(p.get("profit") or p.get("unrealized_pnl") or 0.0)
+                        side = str(p.get("side") or p.get("direction") or "buy").lower()
+                        if open_p > 0 and vol > 0 and profit != 0.0:
+                            multiplier = vol * 100.0
+                            if side == "buy":
+                                live_bid = round(open_p + (profit / multiplier), 2)
+                                live_ask = round(live_bid + 0.25, 2)
+                            else:
+                                live_ask = round(open_p - (profit / multiplier), 2)
+                                live_bid = round(live_ask - 0.25, 2)
+                            if 2000.0 < live_bid < 10000.0:
+                                self._cached_quote = {"bid": live_bid, "ask": live_ask}
+                                self._quote_cache_time = now
+                                return self._cached_quote
+        except Exception as e:
+            logger.debug(f"Position-derived quote note: {e}")
+
+        # 3. Direct probe of Exness market-data candle endpoint
+        symbols_to_try = [symbol]
+        if "XAUUSD" in symbol and "m" not in symbol:
+            symbols_to_try.append(symbol + "m")
+        if self.account_id and now > self.rate_limit_backoff_until:
+            for sym in symbols_to_try:
+                try:
+                    path = f"/v1/market-data/accounts/{self.account_id}/candles?instrument={sym}&timeframe=M1&price_type=bid&count=1"
+                    resp = await self._request("GET", path)
+                    candles = resp.json().get("candles", [])
+                    if candles and "close" in candles[-1]:
+                        cbid = float(candles[-1]["close"])
+                        if cbid > 0:
+                            self._cached_quote = {"bid": round(cbid, 2), "ask": round(cbid + 0.25, 2)}
+                            self._quote_cache_time = now
+                            return self._cached_quote
+                except Exception:
+                    pass
+
+        # 4. Fallback to authentic real-time Spot Gold (XAU/USD) market feed
         live_quote = await self._fetch_live_interbank_quote()
         if live_quote and live_quote.get("bid", 0.0) > 0:
             self._cached_quote = live_quote
@@ -529,12 +576,39 @@ class ExnessClient:
         return self._cached_quote or {"bid": 0.0, "ask": 0.0}
 
     async def _fetch_live_interbank_quote(self) -> Dict[str, float]:
-        """Fetches real-time institutional gold price from interbank market feed."""
+        """Fetches real-time Spot Gold (XAU/USD) price, avoiding COMEX futures premium."""
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+        # 1. Dedicated real-time Spot Gold (XAU/USD) API
+        try:
+            async with httpx.AsyncClient(timeout=4.0, headers=headers) as http_client:
+                resp = await http_client.get("https://api.gold-api.com/price/XAU")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    price = float(data.get("price", 0.0))
+                    if price > 0:
+                        spread = 0.25  # Standard retail/institutional spot spread
+                        return {"bid": round(price, 2), "ask": round(price + spread, 2)}
+        except Exception as e:
+            logger.debug(f"Spot gold API note: {e}")
+
+        # 2. Allocated Physical Gold Spot (PAXG / Tether Gold)
+        try:
+            async with httpx.AsyncClient(timeout=4.0, headers=headers) as http_client:
+                resp = await http_client.get("https://api.coingecko.com/api/v3/simple/price?ids=pax-gold,tether-gold&vs_currencies=usd")
+                if resp.status_code == 200:
+                    d = resp.json()
+                    paxg = float(d.get("pax-gold", {}).get("usd", 0.0)) or float(d.get("tether-gold", {}).get("usd", 0.0))
+                    if paxg > 0:
+                        return {"bid": round(paxg, 2), "ask": round(paxg + 0.25, 2)}
+        except Exception:
+            pass
+
+        # 3. Tertiary fallback: COMEX Gold Futures (GC=F)
         feed_urls = [
             "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d",
             "https://query2.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
         ]
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         for u in feed_urls:
             try:
                 async with httpx.AsyncClient(timeout=4.0, headers=headers) as http_client:
@@ -543,21 +617,10 @@ class ExnessClient:
                         res = resp.json().get("chart", {}).get("result", [{}])[0]
                         price = float(res.get("meta", {}).get("regularMarketPrice", 0.0))
                         if price > 0:
-                            spread = 0.25  # Standard institutional XAU/USD spread
+                            spread = 0.25
                             return {"bid": round(price, 2), "ask": round(price + spread, 2)}
             except Exception as e:
                 logger.debug(f"Interbank quote fallback note ({u}): {e}")
-
-        # Secondary Crypto-backed Pax Gold (PAXG) 1:1 allocated physical gold fallback
-        try:
-            async with httpx.AsyncClient(timeout=4.0, headers=headers) as http_client:
-                resp = await http_client.get("https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd")
-                if resp.status_code == 200:
-                    paxg = float(resp.json().get("pax-gold", {}).get("usd", 0.0))
-                    if paxg > 0:
-                        return {"bid": round(paxg, 2), "ask": round(paxg + 0.30, 2)}
-        except Exception:
-            pass
 
         return {"bid": 0.0, "ask": 0.0}
 
@@ -637,6 +700,15 @@ class ExnessClient:
                                 "close": float(closes[i]),
                                 "volume": float(volumes[i] if (volumes and i < len(volumes) and volumes[i] is not None) else 100.0)
                             })
+                    if candles and self._cached_quote and self._cached_quote.get("bid", 0.0) > 0:
+                        # Normalize candles to Spot Gold price if futures basis premium exists
+                        basis_diff = candles[-1]["close"] - self._cached_quote["bid"]
+                        if abs(basis_diff) > 0.5 and abs(basis_diff) < 50.0:
+                            for c in candles:
+                                c["open"] = round(c["open"] - basis_diff, 2)
+                                c["high"] = round(c["high"] - basis_diff, 2)
+                                c["low"] = round(c["low"] - basis_diff, 2)
+                                c["close"] = round(c["close"] - basis_diff, 2)
                     if candles:
                         return candles[-count:]
         except Exception as e:

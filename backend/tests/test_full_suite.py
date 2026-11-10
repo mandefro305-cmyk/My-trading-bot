@@ -197,3 +197,26 @@ def test_chart_renderer_and_sentiment_nlp():
     assert "tone" in sentiment
     assert "gold_impact" in sentiment
     assert len(sentiment.get("bullets", [])) == 3
+
+def test_exness_spot_gold_quote_derivation():
+    import asyncio
+    from backend.app.broker.exness.client import ExnessClient
+
+    client = ExnessClient(account_id="11001076889", api_key="dummy")
+    # Simulate an active position on Exness with reported profit
+    client._cached_snapshot = {
+        "positions": [
+            {
+                "id": "121511003",
+                "instrument": "XAUUSDm",
+                "side": "buy",
+                "volume": 0.01,
+                "open_price": 4111.00,
+                "profit": 0.02
+            }
+        ]
+    }
+    quote = asyncio.run(client.get_quote("XAUUSD"))
+    # multiplier = 0.01 * 100 = 1.0; profit = 0.02; implied live bid = 4111.00 + 0.02 = 4111.02
+    assert quote["bid"] == 4111.02
+    assert quote["ask"] == 4111.27
