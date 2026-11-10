@@ -582,8 +582,8 @@ class TelegramControlBot:
         text = f"📈 <b>Active Open Positions</b> ({len(valid_positions)}) {badge}\n\n"
         buttons = []
         for pid, pos in valid_positions.items():
-            # Use broker reported profit if available; otherwise calculate via bid/ask
-            if "broker_profit" in pos and pos["broker_profit"] != 0.0:
+            # Use broker reported profit if available (including 0.00); otherwise calculate via bid/ask
+            if pos.get("broker_profit") is not None:
                 pnl = float(pos["broker_profit"])
             else:
                 pnl = (bid - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - ask) * pos["volume"] * 100.0

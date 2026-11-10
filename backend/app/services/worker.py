@@ -3,6 +3,7 @@ import datetime
 import time
 import uuid
 import logging
+import pandas as pd
 from typing import Optional, Dict, Any, List
 from backend.app.config.settings import settings
 from backend.app.broker.exness.client import ExnessClient
