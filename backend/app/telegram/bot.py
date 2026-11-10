@@ -582,18 +582,29 @@ class TelegramControlBot:
         text = f"📈 <b>Active Open Positions</b> ({len(valid_positions)}) {badge}\n\n"
         buttons = []
         for pid, pos in valid_positions.items():
-            # Use broker reported profit if available (including 0.00); otherwise calculate via bid/ask
-            if pos.get("broker_profit") is not None:
-                pnl = float(pos["broker_profit"])
+            direction = str(pos.get("direction", "buy")).lower()
+            open_price = float(pos.get("open_price", bid))
+            volume = float(pos.get("volume", 0.01))
+
+            # Dynamic live floating PnL calculation based on real-time bid/ask and 100 multiplier for XAU/USD
+            if direction == "buy":
+                floating_pnl = (bid - open_price) * volume * 100.0
             else:
-                pnl = (bid - pos["open_price"]) * pos["volume"] * 100.0 if pos["direction"] == "buy" else (pos["open_price"] - ask) * pos["volume"] * 100.0
+                floating_pnl = (open_price - ask) * volume * 100.0
+
+            broker_pnl = pos.get("broker_profit")
+            if broker_pnl is not None and float(broker_pnl) != 0.0:
+                pnl = float(broker_pnl)
+            else:
+                pnl = floating_pnl
+
             pnl_sign = "+" if pnl >= 0 else ""
             sl_str = f"${pos['stop_loss']:.2f}" if pos.get('stop_loss', 0) > 0 else "None"
             tp_str = f"${pos['take_profit_1']:.2f}" if pos.get('take_profit_1', 0) > 0 else "None"
 
             text += (
                 f"• <b>Ticket #{pid}</b>: <b>{pos['direction'].upper()} {pos['volume']} lots</b> @ ${pos['open_price']:.2f}\n"
-                f"  SL: {sl_str} | TP: {tp_str} | PnL: <b>{pnl_sign}${pnl:.2f} USD</b>\n\n"
+                f"  SL: {sl_str} | TP: {tp_str} | Floating PnL: <b>{pnl_sign}${pnl:.2f} USD</b>\n\n"
             )
             buttons.append([
                 InlineKeyboardButton(f"❌ Close #{pid}", callback_data=f"pos_close_{pid}"),

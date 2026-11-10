@@ -191,6 +191,14 @@ class BackgroundWorker:
                                 self.current_bid = round(implied_bid, 2)
                                 self.current_ask = round(implied_bid + 0.25, 2)
 
+                        # Calculate real-time floating pnl
+                        multiplier = vol * 100.0
+                        if direction == "buy":
+                            calculated_floating = (self.current_bid - open_p) * multiplier
+                        else:
+                            calculated_floating = (open_p - self.current_ask) * multiplier
+                        live_profit = profit if profit != 0.0 else round(calculated_floating, 2)
+
                         if pid not in self.positions:
                             self.positions[pid] = {
                                 "id": pid,
@@ -205,12 +213,12 @@ class BackgroundWorker:
                                 "take_profit_3": tp if tp > 0 else (open_p + 12.0 if direction == "buy" else open_p - 12.0),
                                 "tp1_hit": False,
                                 "tp2_hit": False,
-                                "broker_profit": profit
+                                "broker_profit": live_profit
                             }
                         else:
                             # Update dynamic live stats
                             self.positions[pid]["volume"] = vol
-                            self.positions[pid]["broker_profit"] = profit
+                            self.positions[pid]["broker_profit"] = live_profit
                             if sl > 0:
                                 self.positions[pid]["stop_loss"] = sl
 
